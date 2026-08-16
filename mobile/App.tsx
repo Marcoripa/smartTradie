@@ -6,114 +6,144 @@ import {
   TouchableOpacity,
   SafeAreaView,
   StatusBar,
-  TextInput,
-  Modal,
 } from 'react-native';
-import { initDatabase, getAllNotesRecords } from './src/services/sqlite';
-import {
-  setupNetworkSyncListener,
-  setSimulatedOffline,
-  isSimulatedOffline,
-  syncPendingQueue,
-  setBackendUrl,
-  getBackendUrl,
-} from './src/services/sync';
-import { useVoiceStateMachine } from './src/hooks/useVoiceStateMachine';
-import { VoiceStep, LocalNoteRecord } from './src/types';
+import { sqliteQueueService, NoteQueueRecord } from './src/services/SQLiteQueueService';
+import { firebaseSyncManager } from './src/services/FirebaseSyncManager';
+import { wakeWordService } from './src/services/WakeWordService';
+import { voiceStateMachine } from './src/services/VoiceStateMachine';
+import { useVoiceStateMachine, DriveSessionStep } from './src/hooks/useVoiceStateMachine';
 import { DriveModeHeader } from './src/components/DriveModeHeader';
 import { AudioVisualizer } from './src/components/AudioVisualizer';
 import { QueueViewer } from './src/components/QueueViewer';
-import { Mic, StopCircle, SkipForward, Settings, Radio } from 'lucide-react-native';
+import { WorkflowPickerModal } from './src/components/WorkflowPickerModal';
+import { WorkflowTemplate } from './src/types/workflow';
+import { DEFAULT_WORKFLOW_TEMPLATES } from './src/services/WorkflowTemplates';
+import { Mic, StopCircle, SkipForward, Radio, Layers, ChevronDown } from 'lucide-react-native';
 
 export default function App() {
   const { state, startSession, cancelSession, manualAdvance } = useVoiceStateMachine();
 
-  const [notes, setNotes] = useState<LocalNoteRecord[]>([]);
+  const [notes, setNotes] = useState<NoteQueueRecord[]>([]);
   const [offlineMode, setOfflineMode] = useState<boolean>(false);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
-  const [showSettings, setShowSettings] = useState<boolean>(false);
-  const [backendIp, setBackendIp] = useState<string>(getBackendUrl());
+  const [isWakeWordEnabled, setIsWakeWordEnabled] = useState<boolean>(true);
+  const [isWorkflowModalVisible, setIsWorkflowModalVisible] = useState<boolean>(false);
 
   const refreshNotes = useCallback(async () => {
-    const records = await getAllNotesRecords();
+    const records = await sqliteQueueService.getAllNotes();
     setNotes(records);
   }, []);
 
   useEffect(() => {
     async function prepareApp() {
-      await initDatabase();
+      await sqliteQueueService.initQueueDatabase();
       await refreshNotes();
     }
     prepareApp();
 
-    const cleanupSyncListener = setupNetworkSyncListener((count) => {
-      console.log(`[App] ${count} notes auto-synced upon 4G/5G reconnection!`);
+    // Register wake word listener for hands-free "Hey Mark" trigger
+    wakeWordService.setOnWakeWordDetected((word) => {
+      console.log(`[App] 🎯 Wake word detected: "${word}", launching active workflow hands-free!`);
+      startSession();
+    });
+
+    if (isWakeWordEnabled) {
+      wakeWordService.startListening();
+    }
+
+    const cleanupSyncListener = firebaseSyncManager.startNetworkListener((count) => {
+      console.log(`[App] ${count} notes auto-synced to Firebase!`);
       refreshNotes();
     });
 
     return () => {
       cleanupSyncListener();
+      wakeWordService.stopListening();
     };
-  }, [refreshNotes]);
+  }, [refreshNotes, startSession, isWakeWordEnabled]);
 
   const handleToggleOffline = (val: boolean) => {
     setOfflineMode(val);
-    setSimulatedOffline(val);
+    firebaseSyncManager.setSimulatedOffline(val);
+  };
+
+  const handleToggleWakeWord = (val: boolean) => {
+    setIsWakeWordEnabled(val);
+    wakeWordService.setEnabled(val);
+  };
+
+  const handleSelectWorkflow = (template: WorkflowTemplate) => {
+    voiceStateMachine.setActiveWorkflow(template);
   };
 
   const handleTriggerManualSync = async () => {
     setIsSyncing(true);
     try {
-      await syncPendingQueue();
+      await firebaseSyncManager.syncPendingQueue();
       await refreshNotes();
     } finally {
       setIsSyncing(false);
     }
   };
 
-  const saveSettings = () => {
-    setBackendUrl(backendIp);
-    setShowSettings(false);
-  };
-
-  const pendingCount = notes.filter(
-    (n) => n.status === 'PENDING_UPLOAD' || n.status === 'FAILED'
-  ).length;
-
-  const isSessionActive = state.currentStep !== VoiceStep.IDLE;
+  const pendingCount = notes.filter((n) => n.sync_status === 'PENDING_SYNC').length;
+  const isSessionActive = state.currentStep !== DriveSessionStep.IDLE;
 
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
 
-      {/* Top Navigation */}
+      {/* Top Navigation Row with Workflow Switcher */}
       <View style={styles.topNav}>
         <View style={styles.logoGroup}>
-          <Radio color="#38BDF8" size={24} />
-          <Text style={styles.logoText}>SmartTradie Voice</Text>
+          <Radio color="#38BDF8" size={22} />
+          <Text style={styles.logoText}>SmartTradie AI</Text>
         </View>
-        <TouchableOpacity style={styles.settingsBtn} onPress={() => setShowSettings(true)}>
-          <Settings color="#94A3B8" size={20} />
+
+        {/* Workflow Switcher Button */}
+        <TouchableOpacity
+          style={styles.workflowSelectorBtn}
+          onPress={() => setIsWorkflowModalVisible(true)}
+          activeOpacity={0.8}
+        >
+          <Layers color="#C084FC" size={14} />
+          <Text style={styles.workflowSelectorText} numberOfLines={1}>
+            {state.activeWorkflow?.name || 'Field Engineering Note'}
+          </Text>
+          <ChevronDown color="#94A3B8" size={14} />
         </TouchableOpacity>
       </View>
 
-      {/* Drive Mode & Offline Status Header */}
+      {/* Drive Mode, Wake Word & Offline Status Header */}
       <DriveModeHeader
         isSimulatedOffline={offlineMode}
         onToggleOffline={handleToggleOffline}
         isSyncing={isSyncing}
         onTriggerSync={handleTriggerManualSync}
         pendingCount={pendingCount}
+        isWakeWordEnabled={isWakeWordEnabled}
+        onToggleWakeWord={handleToggleWakeWord}
+        wakeWordText="Hey Mark"
+        isSessionActive={isSessionActive}
       />
 
-      {/* Audio Visualizer Stage */}
+      {/* Audio Visualizer Stage & Schema-Driven Step Display */}
       <AudioVisualizer
         currentStep={state.currentStep}
+        executionTier={state.executionTier}
         isSpeaking={state.isSpeaking}
         isRecording={state.isRecording}
-        meterLevel={state.audioMeterLevel}
+        meterLevel={state.meterLevel}
         speechDetected={state.speechDetected}
-        silenceMs={state.silenceDurationMs}
+        silenceMs={state.silenceMs}
+        activeWorkflow={state.activeWorkflow || DEFAULT_WORKFLOW_TEMPLATES[0]}
+        currentStepIndex={state.currentStepIndex}
+        totalSteps={state.totalSteps}
+        currentStepDefinition={state.currentStepDefinition}
+        statusMessage={state.statusMessage}
+        projectNameText={state.projectNameText}
+        projectStatus={state.projectStatus}
+        locationData={state.locationData}
       />
 
       {/* Main Hands-Free Action Controls */}
@@ -121,22 +151,24 @@ export default function App() {
         {!isSessionActive ? (
           <TouchableOpacity
             style={styles.bigStartButton}
-            onPress={startSession}
+            onPress={() => startSession()}
             activeOpacity={0.85}
           >
-            <Mic color="#FFFFFF" size={32} />
-            <Text style={styles.startBtnText}>START HANDS-FREE SESSION</Text>
+            <Mic color="#FFFFFF" size={26} />
+            <Text style={styles.startBtnText}>
+              {isWakeWordEnabled ? 'SAY "HEY MARK" OR TAP TO START' : 'START HANDS-FREE SESSION'}
+            </Text>
           </TouchableOpacity>
         ) : (
           <View style={styles.activeSessionRow}>
             <TouchableOpacity style={styles.cancelBtn} onPress={cancelSession}>
-              <StopCircle color="#EF4444" size={20} />
+              <StopCircle color="#EF4444" size={18} />
               <Text style={styles.cancelBtnText}>Cancel</Text>
             </TouchableOpacity>
 
             {state.isRecording && (
               <TouchableOpacity style={styles.nextBtn} onPress={manualAdvance}>
-                <SkipForward color="#FFFFFF" size={20} />
+                <SkipForward color="#FFFFFF" size={18} />
                 <Text style={styles.nextBtnText}>Done / Next Step</Text>
               </TouchableOpacity>
             )}
@@ -147,31 +179,13 @@ export default function App() {
       {/* SQLite Queue & Processed Notes */}
       <QueueViewer notes={notes} onRefresh={refreshNotes} />
 
-      {/* Backend Settings Modal */}
-      <Modal visible={showSettings} transparent animationType="fade">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Backend Connection</Text>
-            <Text style={styles.modalSub}>
-              Enter FastAPI server URL (e.g., http://192.168.1.X:8000 for local network testing):
-            </Text>
-            <TextInput
-              style={styles.ipInput}
-              value={backendIp}
-              onChangeText={setBackendIp}
-              placeholder="http://localhost:8000"
-              placeholderTextColor="#64748B"
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <View style={styles.modalActions}>
-              <TouchableOpacity style={styles.modalSaveBtn} onPress={saveSettings}>
-                <Text style={styles.modalSaveText}>Save Configuration</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      {/* Dynamic Workflow Picker Modal */}
+      <WorkflowPickerModal
+        visible={isWorkflowModalVisible}
+        onClose={() => setIsWorkflowModalVisible(false)}
+        activeWorkflowId={state.activeWorkflow?.id || 'workflow_voice_note'}
+        onSelectWorkflow={handleSelectWorkflow}
+      />
     </SafeAreaView>
   );
 }
@@ -180,66 +194,79 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#0F172A',
-    paddingHorizontal: 16,
-    paddingTop: 12,
+    paddingHorizontal: 14,
+    paddingTop: 10,
   },
   topNav: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 8,
   },
   logoGroup: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
   },
   logoText: {
     color: '#F8FAFC',
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '800',
     letterSpacing: 0.5,
   },
-  settingsBtn: {
-    padding: 8,
+  workflowSelectorBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
     backgroundColor: '#1E293B',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
+    maxWidth: '52%',
+  },
+  workflowSelectorText: {
+    color: '#E2E8F0',
+    fontSize: 12,
+    fontWeight: '700',
+    flexShrink: 1,
   },
   controlsContainer: {
-    marginVertical: 12,
+    marginVertical: 6,
     alignItems: 'center',
   },
   bigStartButton: {
     backgroundColor: '#0284C7',
     width: '100%',
-    paddingVertical: 18,
-    borderRadius: 16,
+    paddingVertical: 14,
+    borderRadius: 12,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 12,
+    gap: 8,
     shadowColor: '#0284C7',
-    shadowOffset: { width: 0, height: 6 },
+    shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.4,
-    shadowRadius: 10,
-    elevation: 8,
+    shadowRadius: 8,
+    elevation: 6,
   },
   startBtnText: {
     color: '#FFFFFF',
-    fontSize: 16,
+    fontSize: 13,
     fontWeight: '800',
     letterSpacing: 0.5,
   },
   activeSessionRow: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 10,
     width: '100%',
   },
   cancelBtn: {
     flex: 1,
     backgroundColor: 'rgba(239, 68, 68, 0.15)',
-    paddingVertical: 14,
-    borderRadius: 12,
+    paddingVertical: 12,
+    borderRadius: 10,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -250,13 +277,13 @@ const styles = StyleSheet.create({
   cancelBtnText: {
     color: '#EF4444',
     fontWeight: '700',
-    fontSize: 14,
+    fontSize: 13,
   },
   nextBtn: {
     flex: 2,
     backgroundColor: '#16A34A',
-    paddingVertical: 14,
-    borderRadius: 12,
+    paddingVertical: 12,
+    borderRadius: 10,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -265,59 +292,6 @@ const styles = StyleSheet.create({
   nextBtnText: {
     color: '#FFFFFF',
     fontWeight: '700',
-    fontSize: 14,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.75)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  modalContent: {
-    backgroundColor: '#1E293B',
-    borderRadius: 16,
-    padding: 20,
-    width: '100%',
-    maxWidth: 400,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  modalTitle: {
-    color: '#F8FAFC',
-    fontSize: 18,
-    fontWeight: '700',
-    marginBottom: 6,
-  },
-  modalSub: {
-    color: '#94A3B8',
-    fontSize: 12,
-    marginBottom: 16,
-    lineHeight: 18,
-  },
-  ipInput: {
-    backgroundColor: '#0F172A',
-    color: '#F8FAFC',
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 14,
-    borderWidth: 1,
-    borderColor: '#334155',
-    marginBottom: 16,
-  },
-  modalActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-  },
-  modalSaveBtn: {
-    backgroundColor: '#0284C7',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-  },
-  modalSaveText: {
-    color: '#FFFFFF',
-    fontWeight: '600',
     fontSize: 13,
   },
 });

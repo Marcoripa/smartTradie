@@ -25,7 +25,7 @@ The mobile app guides drivers through an automated voice questionnaire, records 
 ### 3. FastAPI Backend & GCP Cloud Run Architecture
 - **Resumable GCS Signed Uploads:** Generates Google Cloud Storage signed upload URLs (`x-goog-resumable`) to handle spotty regional internet reconnects without losing upload progress.
 - **AI Processing Engine:** 
-  - **Speech-to-Text:** Google Cloud STT v2 / OpenAI Whisper API integration.
+  - **Speech-to-Text:** 100% On-Device Whisper STT / Google Cloud STT v2 fallback.
   - **Gemini 2.0 Flash:** Cleans noisy driving transcripts (removes "um", "ah", vehicle noise) and converts them into structured JSON/Markdown notes with action items, categories, and urgency levels.
 - **Synchronized DB:** GCP Firestore / Cloud SQL persistent storage with local fallback.
 

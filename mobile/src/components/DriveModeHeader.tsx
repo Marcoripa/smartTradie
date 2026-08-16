@@ -1,6 +1,7 @@
 import React from 'react';
 import { View, Text, StyleSheet, Switch, TouchableOpacity } from 'react-native';
-import { ShieldCheck, Wifi, WifiOff, Volume2, RefreshCw } from 'lucide-react-native';
+import { ShieldCheck, Wifi, WifiOff, Volume2, RefreshCw, Ear, User, Building2 } from 'lucide-react-native';
+import { appConfigService } from '../config/appConfig';
 
 interface DriveModeHeaderProps {
   isSimulatedOffline: boolean;
@@ -8,6 +9,10 @@ interface DriveModeHeaderProps {
   isSyncing: boolean;
   onTriggerSync: () => void;
   pendingCount: number;
+  isWakeWordEnabled: boolean;
+  onToggleWakeWord: (val: boolean) => void;
+  wakeWordText?: string;
+  isSessionActive?: boolean;
 }
 
 export const DriveModeHeader: React.FC<DriveModeHeaderProps> = ({
@@ -16,23 +21,65 @@ export const DriveModeHeader: React.FC<DriveModeHeaderProps> = ({
   isSyncing,
   onTriggerSync,
   pendingCount,
+  isWakeWordEnabled,
+  onToggleWakeWord,
+  wakeWordText = 'Hey Mark',
+  isSessionActive = false,
 }) => {
+  const userName = appConfigService.getUserName();
+  const businessName = appConfigService.getBusinessName();
+  const businessId = appConfigService.getBusinessId();
+
   return (
     <View style={styles.headerCard}>
+      {/* Top Road Safety & User Profile Status */}
       <View style={styles.topRow}>
         <View style={styles.safetyTag}>
-          <ShieldCheck color="#22C55E" size={16} />
-          <Text style={styles.safetyText}>AUS ROAD RULES COMPLIANT (HANDS-FREE)</Text>
+          <ShieldCheck color="#22C55E" size={15} />
+          <Text style={styles.safetyText}>AUS ROAD RULES COMPLIANT</Text>
         </View>
 
-        <View style={styles.audioFocusPill}>
-          <Volume2 color="#38BDF8" size={14} />
-          <Text style={styles.audioFocusText}>AUDIO DUCKING READY</Text>
+        <View style={styles.userProfilePill}>
+          <User color="#38BDF8" size={13} />
+          <Text style={styles.userProfileText}>{userName}</Text>
+          <Text style={styles.userProfileSub}>• {businessName}</Text>
         </View>
       </View>
 
       <View style={styles.divider} />
 
+      {/* Voice Trigger (openWakeWord "Hey Mark") Control */}
+      <View style={styles.controlsRow}>
+        <View style={styles.wakeWordStatus}>
+          <Ear color={isWakeWordEnabled ? '#38BDF8' : '#64748B'} size={20} />
+          <View style={styles.networkTextGroup}>
+            <Text style={styles.networkTitle}>
+              Voice Activation ({wakeWordText})
+            </Text>
+            <Text style={styles.networkSub}>
+              {isWakeWordEnabled
+                ? isSessionActive
+                  ? 'Session active'
+                  : `Say "${wakeWordText}" to start hands-free`
+                : 'Wake word listening disabled'}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.toggleGroup}>
+          <Text style={styles.toggleLabel}>Voice Trigger</Text>
+          <Switch
+            value={isWakeWordEnabled}
+            onValueChange={onToggleWakeWord}
+            trackColor={{ false: '#334155', true: '#0284C7' }}
+            thumbColor={isWakeWordEnabled ? '#38BDF8' : '#94A3B8'}
+          />
+        </View>
+      </View>
+
+      <View style={styles.divider} />
+
+      {/* Network Connectivity & Offline Simulation */}
       <View style={styles.controlsRow}>
         <View style={styles.networkStatus}>
           {isSimulatedOffline ? (
@@ -47,7 +94,7 @@ export const DriveModeHeader: React.FC<DriveModeHeaderProps> = ({
             <Text style={styles.networkSub}>
               {isSimulatedOffline
                 ? `${pendingCount} note(s) queued in local SQLite`
-                : 'Auto-sync active'}
+                : `Firebase synced to ${businessId}`}
             </Text>
           </View>
         </View>
@@ -83,8 +130,8 @@ const styles = StyleSheet.create({
   headerCard: {
     backgroundColor: '#1E293B',
     borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
+    padding: 14,
+    marginBottom: 12,
     borderWidth: 1,
     borderColor: '#334155',
   },
@@ -110,29 +157,42 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 0.5,
   },
-  audioFocusPill: {
+  userProfilePill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 5,
     backgroundColor: 'rgba(56, 189, 248, 0.1)',
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(56, 189, 248, 0.25)',
   },
-  audioFocusText: {
+  userProfileText: {
     color: '#38BDF8',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  userProfileSub: {
+    color: '#94A3B8',
     fontSize: 10,
-    fontWeight: '700',
+    fontWeight: '500',
   },
   divider: {
     height: 1,
     backgroundColor: '#334155',
-    marginVertical: 12,
+    marginVertical: 10,
   },
   controlsRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+  },
+  wakeWordStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
   },
   networkStatus: {
     flexDirection: 'row',
@@ -161,7 +221,7 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   syncBtn: {
-    marginTop: 12,
+    marginTop: 10,
     backgroundColor: '#0284C7',
     borderRadius: 8,
     paddingVertical: 10,

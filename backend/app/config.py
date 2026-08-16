@@ -13,7 +13,6 @@ class Settings(BaseSettings):
     
     # AI Engine Keys
     GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY", "")
-    OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY", "")
     
     # Local Uploads Storage Directory (Fallback when GCS credentials not set)
     LOCAL_UPLOADS_DIR: str = os.getenv("LOCAL_UPLOADS_DIR", "./uploaded_audio")

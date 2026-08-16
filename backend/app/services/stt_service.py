@@ -4,25 +4,9 @@ from app.config import settings
 class STTService:
     async def transcribe_audio(self, audio_path_or_url: str, prompt_context: str = "") -> str:
         """
-        Transcribe audio recording using Google Cloud STT v2 or OpenAI Whisper.
-        Provides realistic domain-specific fallback when credentials are missing.
+        Transcribe audio recording using Google Cloud STT v2 or on-device pipeline fallback.
         """
         print(f"[STT] Transcribing audio: {audio_path_or_url} (Context: {prompt_context})")
-
-        # 1. Check if OpenAI Whisper API Key is present
-        if settings.OPENAI_API_KEY and os.path.exists(audio_path_or_url):
-            try:
-                from openai import AsyncOpenAI
-                client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-                with open(audio_path_or_url, "rb") as audio_file:
-                    transcript = await client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=audio_file,
-                        prompt=prompt_context
-                    )
-                return transcript.text
-            except Exception as e:
-                print(f"[STT] Whisper API error: {e}")
 
         # 2. Check if Google Cloud STT is available
         try:

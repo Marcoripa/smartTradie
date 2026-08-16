@@ -11,6 +11,5 @@ services:
       - GCP_PROJECT_ID=smart-tradie-dev
       - GCS_BUCKET_NAME=smart-tradie-voice-notes
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
       - ./uploaded_audio:/app/uploaded_audio
