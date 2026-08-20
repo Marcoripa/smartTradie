@@ -28,7 +28,7 @@ export const DEFAULT_WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
         required: false,
       },
     ],
-    completionMessage: "Note saved offline. I'll sync this to Firebase when connection returns.",
+    completionMessage: "Note saved successfully.",
     completionAction: 'SAVE_VOICE_NOTE',
   },
   {
@@ -58,7 +58,7 @@ export const DEFAULT_WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
         required: false,
       },
     ],
-    completionMessage: 'Materials logged offline. Stock deduction will sync to database.',
+    completionMessage: 'Materials logged successfully.',
     completionAction: 'DEDUCT_MATERIALS',
   },
   {
@@ -88,7 +88,7 @@ export const DEFAULT_WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
         required: false,
       },
     ],
-    completionMessage: 'Timesheet entry recorded with GPS timestamp.',
+    completionMessage: 'Timesheet entry recorded.',
     completionAction: 'CLOCK_JOB_TIME',
   },
   {
@@ -118,7 +118,7 @@ export const DEFAULT_WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
         required: true,
       },
     ],
-    completionMessage: 'Safety compliance audit logged with GPS and timestamp.',
+    completionMessage: 'Safety compliance audit logged.',
     completionAction: 'SAFETY_LOG',
   },
 ];

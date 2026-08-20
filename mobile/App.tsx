@@ -15,7 +15,6 @@ import { useVoiceStateMachine, DriveSessionStep } from './src/hooks/useVoiceStat
 import { DriveModeHeader } from './src/components/DriveModeHeader';
 import { AudioVisualizer } from './src/components/AudioVisualizer';
 import { QueueViewer } from './src/components/QueueViewer';
-import { WorkflowPickerModal } from './src/components/WorkflowPickerModal';
 import { WorkflowTemplate } from './src/types/workflow';
 import { DEFAULT_WORKFLOW_TEMPLATES } from './src/services/WorkflowTemplates';
 import { Mic, StopCircle, SkipForward, Radio, Layers, ChevronDown } from 'lucide-react-native';
@@ -26,8 +25,6 @@ export default function App() {
   const [notes, setNotes] = useState<NoteQueueRecord[]>([]);
   const [offlineMode, setOfflineMode] = useState<boolean>(false);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
-  const [isWakeWordEnabled, setIsWakeWordEnabled] = useState<boolean>(true);
-  const [isWorkflowModalVisible, setIsWorkflowModalVisible] = useState<boolean>(false);
 
   const refreshNotes = useCallback(async () => {
     const records = await sqliteQueueService.getAllNotes();
@@ -41,15 +38,13 @@ export default function App() {
     }
     prepareApp();
 
-    // Register wake word listener for hands-free "Hey Mark" trigger
+    // Register wake word listener for hands-free "Hey Mark" trigger (always active)
     wakeWordService.setOnWakeWordDetected((word) => {
       console.log(`[App] 🎯 Wake word detected: "${word}", launching active workflow hands-free!`);
       startSession();
     });
 
-    if (isWakeWordEnabled) {
-      wakeWordService.startListening();
-    }
+    wakeWordService.startListening();
 
     const cleanupSyncListener = firebaseSyncManager.startNetworkListener((count) => {
       console.log(`[App] ${count} notes auto-synced to Firebase!`);
@@ -60,16 +55,11 @@ export default function App() {
       cleanupSyncListener();
       wakeWordService.stopListening();
     };
-  }, [refreshNotes, startSession, isWakeWordEnabled]);
+  }, [refreshNotes, startSession]);
 
   const handleToggleOffline = (val: boolean) => {
     setOfflineMode(val);
     firebaseSyncManager.setSimulatedOffline(val);
-  };
-
-  const handleToggleWakeWord = (val: boolean) => {
-    setIsWakeWordEnabled(val);
-    wakeWordService.setEnabled(val);
   };
 
   const handleSelectWorkflow = (template: WorkflowTemplate) => {
@@ -99,19 +89,6 @@ export default function App() {
           <Radio color="#38BDF8" size={22} />
           <Text style={styles.logoText}>SmartTradie AI</Text>
         </View>
-
-        {/* Workflow Switcher Button */}
-        <TouchableOpacity
-          style={styles.workflowSelectorBtn}
-          onPress={() => setIsWorkflowModalVisible(true)}
-          activeOpacity={0.8}
-        >
-          <Layers color="#C084FC" size={14} />
-          <Text style={styles.workflowSelectorText} numberOfLines={1}>
-            {state.activeWorkflow?.name || 'Field Engineering Note'}
-          </Text>
-          <ChevronDown color="#94A3B8" size={14} />
-        </TouchableOpacity>
       </View>
 
       {/* Drive Mode, Wake Word & Offline Status Header */}
@@ -121,8 +98,6 @@ export default function App() {
         isSyncing={isSyncing}
         onTriggerSync={handleTriggerManualSync}
         pendingCount={pendingCount}
-        isWakeWordEnabled={isWakeWordEnabled}
-        onToggleWakeWord={handleToggleWakeWord}
         wakeWordText="Hey Mark"
         isSessionActive={isSessionActive}
       />
@@ -156,7 +131,7 @@ export default function App() {
           >
             <Mic color="#FFFFFF" size={26} />
             <Text style={styles.startBtnText}>
-              {isWakeWordEnabled ? 'SAY "HEY MARK" OR TAP TO START' : 'START HANDS-FREE SESSION'}
+              SAY "HEY MARK" OR TAP TO START
             </Text>
           </TouchableOpacity>
         ) : (
@@ -178,14 +153,6 @@ export default function App() {
 
       {/* SQLite Queue & Processed Notes */}
       <QueueViewer notes={notes} onRefresh={refreshNotes} />
-
-      {/* Dynamic Workflow Picker Modal */}
-      <WorkflowPickerModal
-        visible={isWorkflowModalVisible}
-        onClose={() => setIsWorkflowModalVisible(false)}
-        activeWorkflowId={state.activeWorkflow?.id || 'workflow_voice_note'}
-        onSelectWorkflow={handleSelectWorkflow}
-      />
     </SafeAreaView>
   );
 }
@@ -207,6 +174,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    margin: 'auto',
   },
   logoText: {
     color: '#F8FAFC',

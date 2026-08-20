@@ -18,6 +18,10 @@ class DirectUploadResponse(BaseModel):
 
 class ProcessNoteRequest(BaseModel):
     local_id: str
+    business_id: Optional[str] = None
+    user_id: Optional[str] = None
+    user_name: Optional[str] = None
+    project_id: Optional[str] = None
     created_at: Optional[str] = None
     client_audio_path: str
     content_audio_path: str
@@ -31,6 +35,10 @@ class RawTranscript(BaseModel):
 class StructuredNoteResponse(BaseModel):
     id: str
     local_id: Optional[str] = None
+    business_id: Optional[str] = None
+    user_id: Optional[str] = None
+    user_name: Optional[str] = None
+    project_id: Optional[str] = None
     client_or_project: str
     raw_transcript: RawTranscript
     summary: str

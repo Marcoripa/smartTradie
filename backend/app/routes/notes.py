@@ -34,6 +34,10 @@ async def process_voice_note(payload: ProcessNoteRequest):
         # 3. Store in Database
         db_payload = {
             "local_id": payload.local_id,
+            "business_id": payload.business_id,
+            "user_id": payload.user_id,
+            "user_name": payload.user_name,
+            "project_id": payload.project_id,
             "created_at": payload.created_at,
             "client_or_project": structured.get("client_or_project", client_tx),
             "raw_transcript": raw_transcript.model_dump(),

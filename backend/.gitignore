@@ -1,5 +1,5 @@
 .env
 venv
 uploaded_audio/*
-app/__pycache__/*
+app/__pycache__
 app/routes/__pycache__

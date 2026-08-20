@@ -226,19 +226,25 @@ export const QueueViewer: React.FC<QueueViewerProps> = ({ notes, onRefresh }) =>
     );
   };
 
+  const pendingNotes = notes.filter((n) => n.sync_status !== 'SYNCED');
+
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Offline Workflow Queue ({notes.length})</Text>
-      {notes.length === 0 ? (
+      <View style={styles.headerRow}>
+        <Text style={styles.title}>Offline Sync Queue ({pendingNotes.length})</Text>
+      </View>
+
+      {pendingNotes.length === 0 ? (
         <View style={styles.emptyContainer}>
-          <Text style={styles.emptyText}>No offline workflow logs recorded yet.</Text>
+          <CheckCircle color="#22C55E" size={26} style={{ marginBottom: 6 }} />
+          <Text style={styles.emptyText}>Queue is up to date.</Text>
           <Text style={styles.emptySubtext}>
-            Say "Hey Mark" or tap start. Voice workflows (Notes, Materials, Timesheets, Safety) run on-device and sync when connected.
+            All voice notes are synced to the cloud. New offline records will appear here when out of reception.
           </Text>
         </View>
       ) : (
         <FlatList
-          data={notes}
+          data={pendingNotes}
           keyExtractor={(item) => item.id}
           renderItem={renderNoteItem}
           contentContainerStyle={{ gap: 10, paddingBottom: 30 }}
@@ -253,11 +259,32 @@ const styles = StyleSheet.create({
     flex: 1,
     marginTop: 8,
   },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
   title: {
     color: '#F8FAFC',
     fontSize: 15,
     fontWeight: '700',
-    marginBottom: 8,
+  },
+  syncedPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(34, 197, 94, 0.15)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(34, 197, 94, 0.3)',
+    gap: 4,
+  },
+  syncedPillText: {
+    color: '#22C55E',
+    fontSize: 11,
+    fontWeight: '600',
   },
   emptyContainer: {
     backgroundColor: '#1E293B',

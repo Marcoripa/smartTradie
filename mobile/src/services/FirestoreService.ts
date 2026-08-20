@@ -1,5 +1,6 @@
 import { ProjectRecord, NoteQueueRecord } from './SQLiteQueueService';
 import { appConfigService } from '../config/appConfig';
+import { getBackendUrl } from './sync';
 
 export interface FirestoreConfig {
   projectId: string;
@@ -13,7 +14,7 @@ export interface FirestoreConfig {
 export const defaultFirestoreConfig: FirestoreConfig = {
   projectId: 'smarttradie-505506',
   databaseId: 'smart-tradie',
-  businessId: 'biz_apex_mining',
+  businessId: '',
   storageBucket: 'smart-tradie',
 };
 
@@ -45,22 +46,57 @@ export class FirestoreService {
 
   private getBaseUrl(): string {
     const dbName = this.config.databaseId || 'smart-tradie';
-    return `https://firestore.googleapis.com/v1/projects/${this.config.projectId}/databases/${dbName}/documents`;
+    const base = `https://firestore.googleapis.com/v1/projects/${this.config.projectId}/databases/${dbName}/documents`;
+    return this.config.apiKey ? `${base}?key=${this.config.apiKey}` : base;
   }
 
   /**
-   * Save a project to Firestore scoped under the business ID:
-   * /businesses/{businessId}/projects/{projectId}
+   * Save a project to Firestore scoped under the business ID
    */
   public async saveProjectToFirestore(project: ProjectRecord): Promise<{ success: boolean; firestoreId?: string }> {
     const bizId = this.getBusinessId();
-    console.log(`[FirestoreService] Saving project to Firestore (Biz: ${bizId}, DB: ${this.config.databaseId}):`, project);
+    console.log(`[FirestoreService] Saving project to Firestore (Biz: ${bizId}):`, project);
 
-    const endpoint = `${this.getBaseUrl()}/businesses/${bizId}/projects/${project.id}`;
+    // 1. Primary: Save via authenticated Backend API proxy
+    try {
+      const backendUrl = getBackendUrl();
+      const res = await fetch(`${backendUrl}/api/v1/projects?business_id=${bizId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: project.id,
+          name: project.name,
+          business_id: bizId,
+          status: project.status || 'in progress',
+          created_by_user_id: appConfigService.getUserId(),
+          created_by_user_name: appConfigService.getUserName(),
+          created_at: project.created_at || new Date().toISOString(),
+          synced_at: new Date().toISOString(),
+          latitude: project.latitude,
+          longitude: project.longitude,
+          address: project.address,
+        }),
+      });
 
+      if (res.ok) {
+        const data = await res.json();
+        console.log(`[FirestoreService] Project saved via backend API for business '${bizId}'! ID: ${project.id}`);
+        return { success: true, firestoreId: data.id || project.id };
+      }
+    } catch (e) {
+      console.log('[FirestoreService] Backend proxy unavailable for project save');
+    }
+
+    // 2. Direct Firestore REST fallback (only if API Key is configured)
+    if (!this.config.apiKey) {
+      return { success: false };
+    }
+
+    const endpoint = `https://firestore.googleapis.com/v1/projects/${this.config.projectId}/databases/${this.config.databaseId || 'smart-tradie'}/documents/businesses/${bizId}/projects/${project.id}?key=${this.config.apiKey}`;
     const fields: any = {
       name: { stringValue: project.name },
       business_id: { stringValue: bizId },
+      status: { stringValue: project.status || 'in progress' },
       created_by_user_id: { stringValue: appConfigService.getUserId() },
       created_by_user_name: { stringValue: appConfigService.getUserName() },
       created_at: { stringValue: project.created_at || new Date().toISOString() },
@@ -80,23 +116,17 @@ export class FirestoreService {
     try {
       const response = await fetch(endpoint, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fields }),
       });
 
       if (!response.ok) {
-        const errText = await response.text();
-        console.warn(`[FirestoreService] Firestore response status ${response.status}: ${errText}`);
         return { success: false };
       }
 
       const data = await response.json();
-      console.log(`[FirestoreService] Project saved to Firestore business '${bizId}' successfully! ID: ${project.id}`);
       return { success: true, firestoreId: data.name || project.id };
     } catch (error) {
-      console.warn('[FirestoreService] Network error saving project to Firestore (will queue in SQLite):', error);
       return { success: false };
     }
   }
@@ -106,9 +136,42 @@ export class FirestoreService {
    */
   public async fetchProjectsFromFirestore(): Promise<ProjectRecord[]> {
     const bizId = this.getBusinessId();
-    console.log(`[FirestoreService] Fetching projects for business ${bizId} (DB: ${this.config.databaseId})...`);
-    const endpoint = `${this.getBaseUrl()}/businesses/${bizId}/projects`;
 
+    // 1. Primary: Fetch via authenticated Backend API (uses GCP ADC / Service Account)
+    try {
+      const backendUrl = getBackendUrl();
+      const response = await fetch(`${backendUrl}/api/v1/projects?business_id=${bizId}`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data)) {
+          console.log(`[FirestoreService] Fetched ${data.length} projects via backend API for business ${bizId}`);
+          return data.map((p: any) => ({
+            id: p.id || p._firestore_id,
+            name: p.name || 'Untitled Project',
+            business_id: p.business_id || bizId,
+            status: p.status || 'in progress',
+            created_at: p.created_at || new Date().toISOString(),
+            synced: 1,
+            latitude: p.latitude,
+            longitude: p.longitude,
+            address: p.address || p.site_address,
+          }));
+        }
+      }
+    } catch (e) {
+      // Backend not running / offline -> SQLite will serve offline projects
+    }
+
+    // 2. Direct Firestore REST fallback (only if API Key is configured)
+    if (!this.config.apiKey) {
+      return [];
+    }
+
+    const endpoint = `https://firestore.googleapis.com/v1/projects/${this.config.projectId}/databases/${this.config.databaseId || 'smart-tradie'}/documents/businesses/${bizId}/projects?key=${this.config.apiKey}`;
     try {
       const response = await fetch(endpoint, {
         method: 'GET',
@@ -131,6 +194,7 @@ export class FirestoreService {
           id,
           name: f.name?.stringValue || 'Untitled Project',
           business_id: f.business_id?.stringValue || bizId,
+          status: f.status?.stringValue || 'in progress',
           created_at: f.created_at?.stringValue || new Date().toISOString(),
           synced: 1,
           latitude: f.latitude?.doubleValue,
@@ -139,20 +203,16 @@ export class FirestoreService {
         };
       });
     } catch (e) {
-      console.warn('[FirestoreService] Failed to fetch remote projects, falling back to SQLite:', e);
       return [];
     }
   }
 
   /**
-   * Save a voice note / workflow log to Firestore scoped under the business ID:
-   * /businesses/{businessId}/notes/{noteId}
+   * Save a voice note / workflow log to Firestore scoped under the business ID
    */
   public async saveNoteToFirestore(note: NoteQueueRecord, audioStorageUrl?: string): Promise<{ success: boolean; firestoreId?: string }> {
     const bizId = this.getBusinessId();
-    console.log(`[FirestoreService] Saving note ${note.id} for business ${bizId} (DB: ${this.config.databaseId})...`);
-
-    const endpoint = `${this.getBaseUrl()}/businesses/${bizId}/notes/${note.id}`;
+    console.log(`[FirestoreService] Saving note ${note.id} for business ${bizId}...`);
 
     let parsedActionItems: string[] = [];
     try {
@@ -161,6 +221,38 @@ export class FirestoreService {
       parsedActionItems = note.action_items ? [note.action_items] : [];
     }
 
+    // 1. Primary: Save via authenticated Backend API proxy
+    try {
+      const backendUrl = getBackendUrl();
+      const res = await fetch(`${backendUrl}/api/v1/notes/process`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          local_id: note.id,
+          business_id: bizId,
+          user_id: note.user_id || appConfigService.getUserId(),
+          user_name: note.user_name || appConfigService.getUserName(),
+          project_id: note.matched_project_id || '',
+          client_audio_path: note.audio_file_path || '',
+          content_audio_path: note.audio_file_path || '',
+          actions_audio_path: note.audio_file_path || '',
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        return { success: true, firestoreId: data.id || note.id };
+      }
+    } catch (e) {
+      console.log('[FirestoreService] Backend unavailable for note process');
+    }
+
+    // 2. Direct Firestore REST fallback (only if API Key is configured)
+    if (!this.config.apiKey) {
+      return { success: false };
+    }
+
+    const endpoint = `https://firestore.googleapis.com/v1/projects/${this.config.projectId}/databases/${this.config.databaseId || 'smart-tradie'}/documents/businesses/${bizId}/notes/${note.id}?key=${this.config.apiKey}`;
     const fields: any = {
       business_id: { stringValue: bizId },
       user_id: { stringValue: note.user_id || appConfigService.getUserId() },
@@ -183,7 +275,6 @@ export class FirestoreService {
     if (note.structured_data) {
       fields.structured_data = { stringValue: note.structured_data };
     }
-
     if (note.matched_project_id) {
       fields.matched_project_id = { stringValue: note.matched_project_id };
     }
@@ -211,15 +302,12 @@ export class FirestoreService {
       });
 
       if (!response.ok) {
-        const err = await response.text();
-        console.warn(`[FirestoreService] Save note error ${response.status}: ${err}`);
         return { success: false };
       }
 
       const data = await response.json();
       return { success: true, firestoreId: data.name || note.id };
     } catch (error) {
-      console.warn('[FirestoreService] Network error saving note to Firestore:', error);
       return { success: false };
     }
   }

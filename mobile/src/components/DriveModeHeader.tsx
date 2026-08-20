@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, Switch, TouchableOpacity } from 'react-native';
-import { ShieldCheck, Wifi, WifiOff, Volume2, RefreshCw, Ear, User, Building2 } from 'lucide-react-native';
+import { Wifi, WifiOff, RefreshCw, User } from 'lucide-react-native';
 import { appConfigService } from '../config/appConfig';
 
 interface DriveModeHeaderProps {
@@ -9,8 +9,6 @@ interface DriveModeHeaderProps {
   isSyncing: boolean;
   onTriggerSync: () => void;
   pendingCount: number;
-  isWakeWordEnabled: boolean;
-  onToggleWakeWord: (val: boolean) => void;
   wakeWordText?: string;
   isSessionActive?: boolean;
 }
@@ -21,59 +19,20 @@ export const DriveModeHeader: React.FC<DriveModeHeaderProps> = ({
   isSyncing,
   onTriggerSync,
   pendingCount,
-  isWakeWordEnabled,
-  onToggleWakeWord,
   wakeWordText = 'Hey Mark',
   isSessionActive = false,
 }) => {
   const userName = appConfigService.getUserName();
   const businessName = appConfigService.getBusinessName();
-  const businessId = appConfigService.getBusinessId();
 
   return (
     <View style={styles.headerCard}>
       {/* Top Road Safety & User Profile Status */}
       <View style={styles.topRow}>
-        <View style={styles.safetyTag}>
-          <ShieldCheck color="#22C55E" size={15} />
-          <Text style={styles.safetyText}>AUS ROAD RULES COMPLIANT</Text>
-        </View>
-
         <View style={styles.userProfilePill}>
           <User color="#38BDF8" size={13} />
           <Text style={styles.userProfileText}>{userName}</Text>
           <Text style={styles.userProfileSub}>• {businessName}</Text>
-        </View>
-      </View>
-
-      <View style={styles.divider} />
-
-      {/* Voice Trigger (openWakeWord "Hey Mark") Control */}
-      <View style={styles.controlsRow}>
-        <View style={styles.wakeWordStatus}>
-          <Ear color={isWakeWordEnabled ? '#38BDF8' : '#64748B'} size={20} />
-          <View style={styles.networkTextGroup}>
-            <Text style={styles.networkTitle}>
-              Voice Activation ({wakeWordText})
-            </Text>
-            <Text style={styles.networkSub}>
-              {isWakeWordEnabled
-                ? isSessionActive
-                  ? 'Session active'
-                  : `Say "${wakeWordText}" to start hands-free`
-                : 'Wake word listening disabled'}
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.toggleGroup}>
-          <Text style={styles.toggleLabel}>Voice Trigger</Text>
-          <Switch
-            value={isWakeWordEnabled}
-            onValueChange={onToggleWakeWord}
-            trackColor={{ false: '#334155', true: '#0284C7' }}
-            thumbColor={isWakeWordEnabled ? '#38BDF8' : '#94A3B8'}
-          />
         </View>
       </View>
 
@@ -94,7 +53,7 @@ export const DriveModeHeader: React.FC<DriveModeHeaderProps> = ({
             <Text style={styles.networkSub}>
               {isSimulatedOffline
                 ? `${pendingCount} note(s) queued in local SQLite`
-                : `Firebase synced to ${businessId}`}
+                : `Synced with Cloud`}
             </Text>
           </View>
         </View>
@@ -193,6 +152,41 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
     flex: 1,
+  },
+  activeEarPill: {
+    backgroundColor: 'rgba(56, 189, 248, 0.15)',
+    padding: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(56, 189, 248, 0.3)',
+  },
+  activeIndicatorBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(15, 23, 42, 0.7)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  activeDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  activeDotListening: {
+    backgroundColor: '#22C55E',
+  },
+  activeDotBusy: {
+    backgroundColor: '#38BDF8',
+  },
+  activeText: {
+    color: '#94A3B8',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.5,
   },
   networkStatus: {
     flexDirection: 'row',

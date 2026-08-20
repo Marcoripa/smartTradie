@@ -1,6 +1,7 @@
 import * as SQLite from 'expo-sqlite';
 import { Platform } from 'react-native';
 import { appConfigService } from '../config/appConfig';
+import { ProjectMatcher, ProjectMatchResult } from './ProjectMatcher';
 
 export type SyncStatus = 'PENDING_SYNC' | 'SYNCING' | 'SYNCED';
 export type ProjectResolutionStatus = 'NEW_PROJECT' | 'MATCHED' | 'EXISTING_PENDING_MATCH';
@@ -9,6 +10,7 @@ export interface ProjectRecord {
   id: string;
   name: string;
   business_id?: string;
+  status?: string;
   created_at: string;
   synced: number; // 0 for offline draft, 1 for synced to Firestore
   latitude?: number;
@@ -45,11 +47,7 @@ export interface NoteQueueRecord {
 const DB_NAME = 'smart_tradie_queue.db';
 let db: SQLite.SQLiteDatabase | null = null;
 const memoryNotesStore: Map<string, NoteQueueRecord> = new Map();
-const memoryProjectsStore: Map<string, ProjectRecord> = new Map([
-  ['proj_bhp', { id: 'proj_bhp', name: 'BHP Pilbara Mining Facility', business_id: 'biz_apex_mining', created_at: new Date().toISOString(), synced: 1, latitude: -21.341, longitude: 119.743 }],
-  ['proj_sydney', { id: 'proj_sydney', name: 'Sydney Rail Overhead Electrification', business_id: 'biz_apex_mining', created_at: new Date().toISOString(), synced: 1, address: 'Central Station, Sydney NSW' }],
-  ['proj_rio', { id: 'proj_rio', name: 'Rio Tinto Solar Array Substation', business_id: 'biz_apex_mining', created_at: new Date().toISOString(), synced: 1, latitude: -20.725, longitude: 116.846 }]
-]);
+const memoryProjectsStore: Map<string, ProjectRecord> = new Map();
 
 function persistWebStorage() {
   if (Platform.OS === 'web' && typeof localStorage !== 'undefined') {
@@ -104,11 +102,11 @@ export class SQLiteQueueService {
         CREATE TABLE IF NOT EXISTS notes (
           id TEXT PRIMARY KEY NOT NULL,
           timestamp TEXT NOT NULL,
-          business_id TEXT DEFAULT 'biz_apex_mining',
-          user_id TEXT DEFAULT 'usr_tradie_088',
-          user_name TEXT DEFAULT 'Dave',
+          business_id TEXT,
+          user_id TEXT,
+          user_name TEXT,
           workflow_id TEXT DEFAULT 'workflow_voice_note',
-          workflow_title TEXT DEFAULT 'Field Engineering Note',
+          workflow_title TEXT DEFAULT 'Voice Note',
           project_name TEXT NOT NULL,
           is_new_project INTEGER NOT NULL DEFAULT 1,
           project_status TEXT NOT NULL DEFAULT 'NEW_PROJECT',
@@ -133,7 +131,8 @@ export class SQLiteQueueService {
         CREATE TABLE IF NOT EXISTS projects (
           id TEXT PRIMARY KEY NOT NULL,
           name TEXT NOT NULL,
-          business_id TEXT DEFAULT 'biz_apex_mining',
+          business_id TEXT,
+          status TEXT DEFAULT 'IN_PROGRESS',
           created_at TEXT NOT NULL,
           synced INTEGER NOT NULL DEFAULT 0,
           latitude REAL,
@@ -142,17 +141,6 @@ export class SQLiteQueueService {
         );
       `);
 
-      // Seed starter projects if table is empty
-      const existingProjects = await db.getAllAsync<ProjectRecord>('SELECT * FROM projects LIMIT 1;');
-      if (existingProjects.length === 0) {
-        await db.runAsync(
-          `INSERT INTO projects (id, name, business_id, created_at, synced, latitude, longitude, address) VALUES 
-           ('proj_bhp', 'BHP Pilbara Mining Facility', 'biz_apex_mining', datetime('now'), 1, -21.341, 119.743, NULL),
-           ('proj_sydney', 'Sydney Rail Overhead Electrification', 'biz_apex_mining', datetime('now'), 1, NULL, NULL, 'Central Station, Sydney NSW'),
-           ('proj_rio', 'Rio Tinto Solar Array Substation', 'biz_apex_mining', datetime('now'), 1, -20.725, 116.846, NULL);`
-        );
-      }
-
       console.log('[SQLiteQueueService] SQLite notes & projects tables ready.');
     } catch (error) {
       console.error('[SQLiteQueueService] Failed to initialize SQLite database:', error);
@@ -160,31 +148,43 @@ export class SQLiteQueueService {
   }
 
   /**
-   * Search local projects by name for offline matching (scoped by business)
+   * Returns all local cached projects
    */
-  public async searchLocalProjects(query: string): Promise<ProjectRecord | null> {
-    const cleanQuery = query.toLowerCase().trim();
-    if (!cleanQuery) return null;
-
+  public async getAllProjects(): Promise<ProjectRecord[]> {
     if (Platform.OS === 'web' || !db) {
-      for (const project of memoryProjectsStore.values()) {
-        if (project.name.toLowerCase().includes(cleanQuery) || cleanQuery.includes(project.name.toLowerCase())) {
-          return project;
-        }
-      }
-      return null;
+      return Array.from(memoryProjectsStore.values());
     }
 
     try {
       const rows = await db.getAllAsync<ProjectRecord>(
-        `SELECT * FROM projects WHERE LOWER(name) LIKE ? LIMIT 1;`,
-        [`%${cleanQuery}%`]
+        `SELECT * FROM projects ORDER BY created_at DESC;`
       );
-      return rows.length > 0 ? rows[0] : null;
+      return rows || [];
     } catch (e) {
-      console.warn('[SQLiteQueueService] Project lookup error:', e);
-      return null;
+      console.warn('[SQLiteQueueService] Error fetching all projects:', e);
+      return Array.from(memoryProjectsStore.values());
     }
+  }
+
+  /**
+   * Search local projects by name with 3-tier fuzzy & GPS matching (scoped by business)
+   */
+  public async searchLocalProjects(
+    query: string,
+    currentGPS?: { latitude?: number; longitude?: number }
+  ): Promise<ProjectMatchResult> {
+    const cleanQuery = query.toLowerCase().trim();
+    if (!cleanQuery) {
+      return {
+        bestMatch: null,
+        confidence: 0,
+        matchReason: 'Empty query',
+        isFuzzyConfirmationNeeded: false,
+      };
+    }
+
+    const allProjects = await this.getAllProjects();
+    return ProjectMatcher.matchProject(cleanQuery, allProjects, currentGPS);
   }
 
   /**
@@ -201,6 +201,7 @@ export class SQLiteQueueService {
       id: projectId,
       name: projectName.trim(),
       business_id: bizId,
+      status: 'IN_PROGRESS',
       created_at: new Date().toISOString(),
       synced,
       latitude: locationData?.latitude,
@@ -216,11 +217,12 @@ export class SQLiteQueueService {
 
     try {
       await db.runAsync(
-        `INSERT INTO projects (id, name, business_id, created_at, synced, latitude, longitude, address) VALUES (?, ?, ?, ?, ?, ?, ?, ?);`,
+        `INSERT INTO projects (id, name, business_id, status, created_at, synced, latitude, longitude, address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
         [
           newProject.id,
           newProject.name,
           newProject.business_id || bizId,
+          newProject.status || 'IN_PROGRESS',
           newProject.created_at,
           newProject.synced,
           newProject.latitude || null,
@@ -292,18 +294,6 @@ export class SQLiteQueueService {
       }
     }
     if (Platform.OS === 'web') persistWebStorage();
-  }
-
-  public async getAllProjects(): Promise<ProjectRecord[]> {
-    if (Platform.OS === 'web' || !db) {
-      return Array.from(memoryProjectsStore.values());
-    }
-
-    try {
-      return await db.getAllAsync<ProjectRecord>(`SELECT * FROM projects ORDER BY created_at DESC;`);
-    } catch (error) {
-      return [];
-    }
   }
 
   public async enqueueNote(

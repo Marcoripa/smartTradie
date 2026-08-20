@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routes import upload, notes, health
+from app.routes import upload, notes, health, auth, projects, inventory, invoices
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -10,7 +10,7 @@ app = FastAPI(
     docs_url=f"{settings.API_PREFIX}/docs"
 )
 
-# Enable CORS for mobile app & local dev
+# Enable CORS for Next.js dashboard & mobile app
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,11 +22,15 @@ app.add_middleware(
 app.include_router(health.router, prefix=settings.API_PREFIX)
 app.include_router(upload.router, prefix=settings.API_PREFIX)
 app.include_router(notes.router, prefix=settings.API_PREFIX)
+app.include_router(auth.router, prefix=settings.API_PREFIX)
+app.include_router(projects.router, prefix=settings.API_PREFIX)
+app.include_router(inventory.router, prefix=settings.API_PREFIX)
+app.include_router(invoices.router, prefix=settings.API_PREFIX)
 
 @app.get("/")
 async def root():
     return {
-        "message": "Welcome to SmartTradie Hands-Free Offline Voice Note API",
+        "message": "Welcome to SmartTradie Tradie Business Management & Voice Note API",
         "docs": f"{settings.API_PREFIX}/docs",
         "health": f"{settings.API_PREFIX}/health"
     }

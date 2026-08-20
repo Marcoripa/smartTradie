@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import bundledConfig from './appConfig.json';
 
 export interface AppConfig {
   user_id: string;
@@ -7,17 +8,17 @@ export interface AppConfig {
   business_name: string;
 }
 
-// Default device configuration (can be packaged with the app APK/bundle or loaded on first boot)
+// Device configuration (loaded directly from appConfig.json or persisted storage)
 export const DEFAULT_APP_CONFIG: AppConfig = {
-  user_id: 'usr_tradie_088',
-  user_name: 'Dave',
-  business_id: 'biz_apex_mining',
-  business_name: 'Apex Mining & Electrical Services',
+  user_id: bundledConfig.user_id || '',
+  user_name: bundledConfig.user_name || '',
+  business_id: bundledConfig.business_id || '',
+  business_name: bundledConfig.business_name || '',
 };
 
 class AppConfigService {
   private static instance: AppConfigService;
-  private config: AppConfig = DEFAULT_APP_CONFIG;
+  private config: AppConfig = { ...DEFAULT_APP_CONFIG };
 
   private constructor() {
     this.loadPersistedConfig();
@@ -35,10 +36,19 @@ class AppConfigService {
       try {
         const saved = localStorage.getItem('smart_tradie_app_config');
         if (saved) {
-          this.config = { ...DEFAULT_APP_CONFIG, ...JSON.parse(saved) };
+          const parsed = JSON.parse(saved);
+          // Prefer non-empty bundledConfig if saved was blank
+          this.config = {
+            user_id: parsed.user_id || DEFAULT_APP_CONFIG.user_id,
+            user_name: parsed.user_name || DEFAULT_APP_CONFIG.user_name,
+            business_id: parsed.business_id || DEFAULT_APP_CONFIG.business_id,
+            business_name: parsed.business_name || DEFAULT_APP_CONFIG.business_name,
+          };
+          return;
         }
       } catch {}
     }
+    this.config = { ...DEFAULT_APP_CONFIG };
   }
 
   public getConfig(): AppConfig {

@@ -24,11 +24,19 @@ export class VADTracker {
     this.reset();
   }
 
+  public setConfig(config: Partial<VADConfig>) {
+    this.config = { ...this.config, ...config };
+  }
+
   public reset() {
     this.hasStartedSpeaking = false;
     this.speechStartTime = 0;
     this.silenceStartTime = 0;
     this.recordingStartTime = Date.now();
+  }
+
+  public getHasStartedSpeaking(): boolean {
+    return this.hasStartedSpeaking;
   }
 
   public processAudioLevel(meteringDb: number | undefined): {

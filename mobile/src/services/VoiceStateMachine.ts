@@ -3,6 +3,7 @@ export { ExecutionTier };
 import {
   sqliteQueueService,
   NoteQueueRecord,
+  ProjectRecord,
   ProjectResolutionStatus,
 } from './SQLiteQueueService';
 import { localWhisperService } from './LocalWhisperService';
@@ -34,15 +35,26 @@ export enum DriveSessionStep {
   
   Q1A_NEW_NAME_RECORDING = 'Q1A_NEW_NAME_RECORDING',
   Q1B_EXISTING_NAME_RECORDING = 'Q1B_EXISTING_NAME_RECORDING',
+
+  // Fuzzy Match Project Confirmation Step
+  CONFIRM_PROJECT_MATCH_PROMPT = 'CONFIRM_PROJECT_MATCH_PROMPT',
+  CONFIRM_PROJECT_MATCH_RECORDING = 'CONFIRM_PROJECT_MATCH_RECORDING',
+  CONFIRM_PROJECT_MATCH_REASONING = 'CONFIRM_PROJECT_MATCH_REASONING',
+
+  // Create New Project when Existing Not Found Confirmation Step
+  CONFIRM_CREATE_NEW_PROJECT_PROMPT = 'CONFIRM_CREATE_NEW_PROJECT_PROMPT',
+  CONFIRM_CREATE_NEW_PROJECT_RECORDING = 'CONFIRM_CREATE_NEW_PROJECT_RECORDING',
+  CONFIRM_CREATE_NEW_PROJECT_REASONING = 'CONFIRM_CREATE_NEW_PROJECT_REASONING',
+
   Q2_LOC_VERIFY_RECORDING = 'Q2_LOC_VERIFY_RECORDING',
   Q2A_ADDRESS_RECORDING = 'Q2A_ADDRESS_RECORDING',
 
-  // Phase 2: Universal Intent Router ("How can I help you today?")
+  // Phase 2: Universal Intent Router & One-Shot Slot Filling ("How can I help you today?")
   UNIVERSAL_HELP_ROUTER_PROMPT = 'UNIVERSAL_HELP_ROUTER_PROMPT',
   UNIVERSAL_HELP_ROUTER_RECORDING = 'UNIVERSAL_HELP_ROUTER_RECORDING',
   UNIVERSAL_HELP_ROUTER_REASONING = 'UNIVERSAL_HELP_ROUTER_REASONING',
 
-  // Phase 3: Dynamic Workflow Specific Steps
+  // Phase 3: Dynamic Workflow Specific Steps (Guided Fallback)
   WORKFLOW_STEP_PROMPT = 'WORKFLOW_STEP_PROMPT',
   WORKFLOW_STEP_RECORDING = 'WORKFLOW_STEP_RECORDING',
   WORKFLOW_STEP_REASONING = 'WORKFLOW_STEP_REASONING',
@@ -79,11 +91,143 @@ export interface SessionState {
   projectNameText?: string;
   locationData?: LocationData;
 
+  // Fuzzy match candidate
+  candidateFuzzyProject?: ProjectRecord;
+  originalSpokenProjectName?: string;
+
   // Accumulated dynamic step extractions
   workflowResults: Record<string, any>;
   rawTranscriptText?: string;
   actionItemsText?: string;
   statusMessage: string;
+}
+
+/**
+ * Robust Acoustic Phonetic Normalizer & Binary Intent Classifier
+ * Accurately catches Whisper misrecognitions (e.g. "now" / "know" for "no", "yeh" for "yes")
+ */
+export class BinaryIntentClassifier {
+  private static readonly NO_TOKENS = new Set([
+    'no',
+    'now',     // common Whisper misrecognition of "no"
+    'know',    // common Whisper misrecognition of "no"
+    'naw',
+    'nau',
+    'gnaw',
+    'nah',
+    'nope',
+    'not',
+    'none',
+    'noo',
+    'nooo',
+    'negative',
+    'wrong',
+    'cancel',
+    'stop',
+    'different',
+    'never',
+    'abort',
+    'quit',
+  ]);
+
+  private static readonly NO_PHRASES = [
+    'no thanks',
+    'no thank you',
+    'not that',
+    'not this',
+    'do not',
+    "don't",
+    'no way',
+    'wrong one',
+    'different one',
+    'wrong project',
+    'other project',
+    'not really',
+    'nope mate',
+    'no mate',
+  ];
+
+  private static readonly YES_TOKENS = new Set([
+    'yes',
+    'yeah',
+    'yep',
+    'yup',
+    'ya',
+    'yah',
+    'yea',
+    'yeh',
+    'yess',
+    'aye',
+    'sure',
+    'correct',
+    'right',
+    'affirmative',
+    'confirm',
+    'ok',
+    'okay',
+    'yessir',
+  ]);
+
+  private static readonly YES_PHRASES = [
+    "that's it",
+    'thats it',
+    'that is it',
+    "that's right",
+    'thats right',
+    'sounds good',
+    'go ahead',
+    'create it',
+    'new one',
+    'correct project',
+    'too right',
+    'all good',
+  ];
+
+  public static classify(spokenText: string | null | undefined): 'YES' | 'NO' | 'UNKNOWN' {
+    if (!spokenText) return 'UNKNOWN';
+    const clean = spokenText.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim();
+    if (!clean) return 'UNKNOWN';
+
+    // 1. Check exact phrase matches
+    for (const phrase of BinaryIntentClassifier.NO_PHRASES) {
+      if (clean.includes(phrase)) return 'NO';
+    }
+    for (const phrase of BinaryIntentClassifier.YES_PHRASES) {
+      if (clean.includes(phrase)) return 'YES';
+    }
+
+    // 2. Tokenize
+    const tokens = clean.split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return 'UNKNOWN';
+
+    let hasNo = false;
+    let hasYes = false;
+
+    for (const token of tokens) {
+      if (BinaryIntentClassifier.NO_TOKENS.has(token)) {
+        hasNo = true;
+      }
+      if (BinaryIntentClassifier.YES_TOKENS.has(token)) {
+        hasYes = true;
+      }
+    }
+
+    if (hasNo && !hasYes) return 'NO';
+    if (hasYes && !hasNo) return 'YES';
+
+    // Single word short homophone catch
+    if (tokens.length === 1) {
+      const single = tokens[0];
+      if (single.startsWith('no') || single === 'now' || single === 'know' || single === 'naw' || single === 'nah') {
+        return 'NO';
+      }
+      if (single.startsWith('ye') || single === 'ya' || single === 'yah' || single === 'yep' || single === 'yup') {
+        return 'YES';
+      }
+    }
+
+    return 'UNKNOWN';
+  }
 }
 
 /**
@@ -149,46 +293,35 @@ class LocalLlamaEngine {
   }
 
   /**
-   * Classifies user affirmation (YES vs NO) for conversational branching
+   * Classifies user affirmation (YES vs NO) for conversational branching & fuzzy project confirmation
    */
-  public async classifyYesNo(spokenText: string, fallbackYes = true): Promise<boolean> {
-    const textLower = spokenText.toLowerCase().trim();
-    if (
-      textLower.includes('yes') ||
-      textLower.includes('yeah') ||
-      textLower.includes('correct') ||
-      textLower.includes('yep') ||
-      textLower.includes('sure') ||
-      textLower.includes('right') ||
-      textLower.includes('cancel it') ||
-      textLower.includes('stop it') ||
-      textLower.includes('confirm')
-    ) {
+  public async classifyYesNo(spokenText: string, fallbackDefault = false): Promise<boolean> {
+    const directResult = BinaryIntentClassifier.classify(spokenText);
+    if (directResult === 'YES') {
+      console.log(`[BinaryIntentClassifier] Spoken "${spokenText}" -> Classified as YES`);
       return true;
     }
-    if (
-      textLower.includes('no') ||
-      textLower.includes('nah') ||
-      textLower.includes('wrong') ||
-      textLower.includes('nope') ||
-      textLower.includes('continue') ||
-      textLower.includes('keep going') ||
-      textLower.includes('resume') ||
-      textLower.includes('different') ||
-      textLower.includes('manual')
-    ) {
+    if (directResult === 'NO') {
+      console.log(`[BinaryIntentClassifier] Spoken "${spokenText}" -> Classified as NO`);
       return false;
     }
 
-    if (this.isLoaded && this.llamaContext) {
-      const answer = await this.generateLocalCompletion(
-        `Does this statement indicate "YES" or "NO"? Statement: "${spokenText}". Answer ONLY with "YES" or "NO".`,
-        fallbackYes ? 'YES' : 'NO'
-      );
-      return answer.toUpperCase().includes('YES');
+    if (this.isLoaded && this.llamaContext && spokenText.trim().length > 0) {
+      try {
+        const answer = await this.generateLocalCompletion(
+          `Does this statement indicate "YES" (affirmative) or "NO" (negative)? Statement: "${spokenText}". Answer ONLY with "YES" or "NO".`,
+          fallbackDefault ? 'YES' : 'NO'
+        );
+        const upper = answer.toUpperCase().trim();
+        if (upper.includes('YES')) return true;
+        if (upper.includes('NO')) return false;
+      } catch (e) {
+        console.warn('[LocalLlamaEngine] Classification error:', e);
+      }
     }
 
-    return fallbackYes;
+    console.log(`[BinaryIntentClassifier] Spoken "${spokenText}" -> UNRESOLVED (fallback: ${fallbackDefault})`);
+    return fallbackDefault;
   }
 
   /**
@@ -211,7 +344,7 @@ class LocalLlamaEngine {
       if (match) return match;
     }
 
-    if (lower.includes('material') || lower.includes('part') || lower.includes('stock') || lower.includes('deduct') || lower.includes('inventory') || lower.includes('pipe') || lower.includes('cement')) {
+    if (lower.includes('material') || lower.includes('part') || lower.includes('stock') || lower.includes('deduct') || lower.includes('inventory') || lower.includes('pipe') || lower.includes('cement') || lower.includes('elbow') || lower.includes('fitting')) {
       const match = workflows.find((w) => w.id === 'workflow_materials_used');
       if (match) return match;
     }
@@ -225,6 +358,78 @@ class LocalLlamaEngine {
     const defaultWf = workflows.find((w) => w.id === 'workflow_voice_note') || workflows[0];
     console.log(`[Llama Intent] Defaulting to "${defaultWf.name}" for spoken phrase: "${spokenText}"`);
     return defaultWf;
+  }
+
+  /**
+   * Extracts one-shot slots from a conversational utterance (One-Shot Slot Filling)
+   */
+  public extractOneShotSlots(
+    spokenText: string,
+    workflow: WorkflowTemplate
+  ): { slots: Record<string, any>; summary?: string; actionItems?: string } {
+    const textLower = spokenText.toLowerCase();
+    const slots: Record<string, any> = {};
+    let summary: string | undefined;
+    let actionItems: string | undefined;
+
+    if (workflow.id === 'workflow_materials_used') {
+      // Look for quantities and materials mentioned in the utterance
+      // e.g. "3 PVC elbows and 2 bags of rapid set" or "used 5 rolls of tape"
+      const matRegex = /\b(\d+)\s*(x|\s)?\s*([a-z0-9\s\-]+?)(?:,\s*|\s+and\s+|\s+plus\s+|$)/gi;
+      const matches: string[] = [];
+      let m: RegExpExecArray | null;
+      while ((m = matRegex.exec(spokenText)) !== null) {
+        const item = m[0].trim().replace(/^and\s+/i, '');
+        if (item && item.length > 2) {
+          matches.push(item);
+        }
+      }
+      if (matches.length > 0) {
+        slots['materials_list'] = matches.join('; ');
+        summary = `Used materials: ${slots['materials_list']}`;
+      } else if (textLower.includes('material') || textLower.includes('part') || textLower.includes('used')) {
+        const clean = spokenText.replace(/^(log|used|materials|parts|deduct)\s+/i, '').trim();
+        if (clean.length > 3) {
+          slots['materials_list'] = clean;
+          summary = `Used materials: ${clean}`;
+        }
+      }
+    } else if (workflow.id === 'workflow_voice_note') {
+      // If the user spoke a comprehensive note (> 5 words)
+      const words = spokenText.trim().split(/\s+/);
+      if (words.length >= 5) {
+        slots['main_observation'] = spokenText.trim();
+        summary = spokenText.trim();
+
+        // Check if action items are included
+        const actionTriggers = ['order', 'schedule', 'follow up', 'need to', 'reorder', 'call', 'check next'];
+        const matchedTrigger = actionTriggers.find((t) => textLower.includes(t));
+        if (matchedTrigger) {
+          const actionIdx = textLower.indexOf(matchedTrigger);
+          const actionPart = spokenText.slice(actionIdx).trim();
+          slots['followup_actions'] = actionPart;
+          actionItems = actionPart;
+        }
+      }
+    } else if (workflow.id === 'workflow_job_clocking') {
+      if (textLower.includes('clock in') || textLower.includes('start job') || textLower.includes('started work')) {
+        slots['clock_action'] = 'CLOCK_IN';
+      } else if (textLower.includes('clock out') || textLower.includes('finish job') || textLower.includes('finished work')) {
+        slots['clock_action'] = 'CLOCK_OUT';
+      }
+      const notePart = spokenText.replace(/(clock in|clock out|start job|finish job)/gi, '').trim();
+      if (notePart.length > 5) {
+        slots['work_scope'] = notePart;
+        summary = notePart;
+      }
+    } else if (workflow.id === 'workflow_safety_audit') {
+      if (textLower.includes('no hazard') || textLower.includes('all safe') || textLower.includes('clear')) {
+        slots['hazards_detected'] = 'No hazards detected. Site clear.';
+        slots['ppe_signoff'] = true;
+      }
+    }
+
+    return { slots, summary, actionItems };
   }
 }
 
@@ -268,19 +473,44 @@ export class VoiceStateMachine {
   private activeAudioUri: string | null = null;
   private contentAudioUri: string | null = null;
 
+  // Fuzzy project matching tracking
+  private candidateFuzzyProject?: ProjectRecord;
+  private originalSpokenProjectName?: string;
+
   // Timeout & Retry management (8.5s silence waiting for voice input)
   private currentPromptText = "Is this for a new project?";
   private stepRetryCount = 0;
   private noSpeechTimeoutTimer: any = null;
-  private readonly NO_SPEECH_TIMEOUT_MS = 8500;
+  private readonly NO_SPEECH_TIMEOUT_MS = 10000;
 
   // Cancel confirmation state tracking
   private previousStepBeforeCancel: DriveSessionStep | null = null;
   private previousPromptBeforeCancel: string = '';
 
+  // Atomic state advancement lock & live speech transcript holder
+  private isAdvancing = false;
+  private lastRecognizedInterimTranscript: string | null = null;
+
   constructor() {
     this.vadTracker = new VADTracker();
     this.state = this.getInitialState();
+  }
+
+  private isShortAnswerStep(step: DriveSessionStep): boolean {
+    return (
+      step === DriveSessionStep.Q1_PROJECT_TYPE_RECORDING ||
+      step === DriveSessionStep.Q2_LOC_VERIFY_RECORDING ||
+      step === DriveSessionStep.CONFIRM_PROJECT_MATCH_RECORDING ||
+      step === DriveSessionStep.CONFIRM_CREATE_NEW_PROJECT_RECORDING ||
+      step === DriveSessionStep.CONFIRM_CANCEL_RECORDING ||
+      (step === DriveSessionStep.WORKFLOW_STEP_RECORDING &&
+        this.state.currentStepDefinition?.type === 'YES_NO_QUESTION')
+    );
+  }
+
+  private hasAffirmativeOrNegativeAnswer(text: string): boolean {
+    const classification = BinaryIntentClassifier.classify(text);
+    return classification === 'YES' || classification === 'NO';
   }
 
   private getInitialState(): SessionState {
@@ -380,6 +610,13 @@ export class VoiceStateMachine {
 
   private async handleNoSpeechTimeout(step: DriveSessionStep): Promise<void> {
     this.clearNoSpeechTimeout();
+
+    // If driver has already spoken or is actively speaking, ignore the initial no-speech timeout
+    if (this.vadTracker.getHasStartedSpeaking() || this.state.speechDetected) {
+      console.log(`[VoiceStateMachine] Ignoring no-speech timeout for step ${step} because speech was already captured.`);
+      return;
+    }
+
     this.stepRetryCount++;
     console.log(`[VoiceStateMachine] No-speech timeout fired for step ${step} (Attempt ${this.stepRetryCount}/2)`);
 
@@ -431,6 +668,8 @@ export class VoiceStateMachine {
     this.activeAudioUri = null;
     this.contentAudioUri = null;
     this.previousStepBeforeCancel = null;
+    this.candidateFuzzyProject = undefined;
+    this.originalSpokenProjectName = undefined;
 
     this.setState({
       currentStep: DriveSessionStep.HARDWARE_CHECK,
@@ -453,95 +692,154 @@ export class VoiceStateMachine {
       ]);
     }
 
-    await enableAudioDuckFocus();
-
-    // Universal Step 1: Project Selection (Personalized Greeting)
-    const userName = appConfigService.getUserName();
-    this.currentPromptText = `Hey ${userName}, is this for a new project?`;
-    this.stepRetryCount = 0;
-
     this.setState({
       executionTier: hardware.tier,
-      currentStep: DriveSessionStep.Q1_PROJECT_TYPE_PROMPT,
-      isSpeaking: true,
-      statusMessage: `Step 1: "Hey ${userName}, is this for a new project?"...`,
     });
 
+    // Start Phase 1 Question 1: "Hi {userName}, is this for a new project?"
+    const userName = appConfigService.getUserName() || 'there';
+    this.currentPromptText = `Hi ${userName}, is this for a new project?`;
+    this.setState({
+      currentStep: DriveSessionStep.Q1_PROJECT_TYPE_PROMPT,
+      isSpeaking: true,
+      statusMessage: `Question 1: "Hi ${userName}, is this for a new project?"`,
+    });
+
+    await enableAudioDuckFocus();
     await speakPrompt(this.currentPromptText, () => {
       this.beginRecordingStep(DriveSessionStep.Q1_PROJECT_TYPE_RECORDING);
     });
   }
 
-  /**
-   * Helper to start audio recording and VAD listener
-   */
   private async beginRecordingStep(step: DriveSessionStep): Promise<void> {
+    this.clearNoSpeechTimeout();
     this.vadTracker.reset();
+
+    const isShortAnswer = this.isShortAnswerStep(step);
+
+    if (isShortAnswer) {
+      // Ultra-fast VAD cutoff for yes/no questions (350ms silence vs 2000ms)
+      this.vadTracker.setConfig({
+        requiredSilenceMs: 350,
+        minSpeechDurationMs: 150,
+      });
+    } else {
+      // Standard VAD cutoff for open-ended speech
+      this.vadTracker.setConfig({
+        requiredSilenceMs: 2000,
+        minSpeechDurationMs: 600,
+      });
+    }
+
+    // Live keyword spotter and speech detector: cancel no-speech timer as soon as user speaks
+    this.lastRecognizedInterimTranscript = null;
+    localWhisperService.setOnInterimTranscript((interim) => {
+      this.clearNoSpeechTimeout();
+      this.lastRecognizedInterimTranscript = interim;
+
+      if (isShortAnswer && !this.isAdvancing && this.hasAffirmativeOrNegativeAnswer(interim)) {
+        console.log(`[VoiceStateMachine] ⚡ Instant short answer recognized: "${interim}". Advancing step immediately!`);
+        this.advanceNextStep();
+      }
+    });
+
+    // Start Web live speech recognition buffer if in web browser preview
     localWhisperService.startWebLiveTranscription();
-    this.startNoSpeechTimeout(step);
+
+    await startAudioRecording((status) => {
+      if (!status.isRecording) return;
+
+      const meter = status.metering ?? -160;
+      const vadStatus = this.vadTracker.processAudioLevel(meter);
+
+      if (vadStatus.speechDetected || vadStatus.hasStartedSpeaking) {
+        this.clearNoSpeechTimeout();
+      }
+
+      this.setState({
+        meterLevel: meter,
+        speechDetected: vadStatus.speechDetected,
+        silenceMs: vadStatus.silenceMs,
+      });
+
+      if (vadStatus.shouldAutoAdvance && !this.isAdvancing) {
+        console.log(`[VoiceStateMachine] VAD auto-cutoff triggered for step ${step}. Advancing.`);
+        this.advanceNextStep();
+      }
+    });
 
     this.setState({
       currentStep: step,
       isRecording: true,
       isSpeaking: false,
-      speechDetected: false,
-      silenceMs: 0,
-      statusMessage: `Listening...`,
+      statusMessage: isShortAnswer ? `Listening for quick answer (Yes/No)...` : `Listening for response...`,
     });
 
-    await startAudioRecording((status) => {
-      if (status.isRecording && status.metering !== undefined) {
-        const vad = this.vadTracker.processAudioLevel(status.metering);
-        this.setState({
-          meterLevel: status.metering,
-          speechDetected: vad.speechDetected,
-          silenceMs: vad.silenceMs,
-        });
-
-        if (vad.hasStartedSpeaking) {
-          this.clearNoSpeechTimeout();
-        }
-
-        if (vad.shouldAutoAdvance) {
-          console.log(`[VoiceStateMachine] VAD auto-advance triggered for ${step}`);
-          this.advanceNextStep();
-        }
-      }
-    });
+    this.startNoSpeechTimeout(step);
   }
 
-  /**
-   * Prompt confirmation when a stop/cancel keyword is detected
-   */
-  private async promptCancelConfirmation(originStep: DriveSessionStep): Promise<void> {
+  public async advanceNextStep(): Promise<void> {
+    if (this.isAdvancing) return;
+    this.isAdvancing = true;
     this.clearNoSpeechTimeout();
-    this.previousStepBeforeCancel = originStep;
+    localWhisperService.setOnInterimTranscript(null);
+
+    try {
+      await this.handleAdvanceStep();
+    } finally {
+      this.isAdvancing = false;
+    }
+  }
+
+  private async promptCancelConfirmation(previousStep: DriveSessionStep): Promise<void> {
+    this.previousStepBeforeCancel = previousStep;
     this.previousPromptBeforeCancel = this.currentPromptText;
-    this.currentPromptText = "Are you sure you want to cancel the session?";
-    this.stepRetryCount = 0;
+    this.currentPromptText = "Are you sure you want to cancel?";
+
+    console.log(`[VoiceStateMachine] Stop keyword detected. Prompting cancel confirmation from step ${previousStep}`);
 
     this.setState({
       currentStep: DriveSessionStep.CONFIRM_CANCEL_PROMPT,
       isSpeaking: true,
-      isRecording: false,
-      statusMessage: 'Stop keyword detected. Confirming cancellation...',
+      statusMessage: 'Cancel requested. Asking: "Are you sure you want to cancel?"...',
     });
 
-    console.log(`[VoiceStateMachine] Stop keyword spoken. Asking cancel confirmation.`);
     await speakPrompt(this.currentPromptText, () => {
       this.beginRecordingStep(DriveSessionStep.CONFIRM_CANCEL_RECORDING);
     });
   }
 
   /**
-   * 2. Main Step Advancement & Universal Router
+   * Graceful recovery for uncaught/empty voice answers (2-Tier: Reprompt -> Safe Fallback)
    */
-  public async advanceNextStep(): Promise<void> {
-    this.clearNoSpeechTimeout();
+  private async handleMissedAnswer(step: DriveSessionStep, fallbackAction: () => Promise<void>): Promise<boolean> {
+    if (this.stepRetryCount === 0) {
+      this.stepRetryCount = 1;
+      console.log(`[VoiceStateMachine] ⚠️ Missed speech on step ${step}. Reprompting (Attempt 1/2)...`);
+      this.setState({
+        isRecording: false,
+        isSpeaking: true,
+        statusMessage: `I didn't catch that. Asking again...`,
+      });
+
+      const reprompt = `I didn't catch that. ${this.currentPromptText}`;
+      await speakPrompt(reprompt, () => {
+        this.beginRecordingStep(step);
+      });
+      return true; // handled by reprompt
+    }
+
+    // Attempt 2: execute safe fallback
     this.stepRetryCount = 0;
+    console.log(`[VoiceStateMachine] ⚠️ Second missed speech on step ${step}. Executing safe fallback...`);
+    await fallbackAction();
+    return true;
+  }
+
+  private async handleAdvanceStep(): Promise<void> {
     const current = this.state.currentStep;
 
-    // --- STOP KEYWORD CONFIRMATION RESOLUTION ---
+    // --- HANDS-FREE CANCEL CONFIRMATION SUB-FLOW ---
     if (current === DriveSessionStep.CONFIRM_CANCEL_RECORDING) {
       const audioUri = await stopAudioRecording();
       this.setState({
@@ -550,8 +848,27 @@ export class VoiceStateMachine {
         statusMessage: 'Evaluating cancel confirmation...',
       });
 
-      const transcribedAnswer = await localWhisperService.transcribeAudioFile(audioUri || '', 'Cancel Confirmation');
-      const isConfirmed = await localLlamaEngine.classifyYesNo(transcribedAnswer, true);
+      let transcribedAnswer = await localWhisperService.transcribeAudioFile(audioUri || '', 'Cancel Confirmation');
+      if ((!transcribedAnswer || transcribedAnswer.trim().length === 0) && this.lastRecognizedInterimTranscript) {
+        transcribedAnswer = this.lastRecognizedInterimTranscript;
+      }
+
+      if (!transcribedAnswer || transcribedAnswer.trim().length === 0) {
+        const handled = await this.handleMissedAnswer(current, async () => {
+          console.log('[VoiceStateMachine] Defaulting to resuming session after silence.');
+          await speakPrompt("Resuming.", () => {
+            if (this.previousStepBeforeCancel) {
+              this.currentPromptText = this.previousPromptBeforeCancel || "Continuing where we left off.";
+              this.beginRecordingStep(this.previousStepBeforeCancel);
+            } else {
+              this.promptUniversalHelpRouter();
+            }
+          });
+        });
+        if (handled) return;
+      }
+
+      const isConfirmed = await localLlamaEngine.classifyYesNo(transcribedAnswer, false);
 
       if (isConfirmed) {
         console.log('[VoiceStateMachine] Cancellation confirmed by voice. Aborting session.');
@@ -592,7 +909,25 @@ export class VoiceStateMachine {
         statusMessage: 'Analyzing project intent (New vs Existing)...',
       });
 
-      const transcribedAnswer = await localWhisperService.transcribeAudioFile(this.activeAudioUri, 'Yes or No new project');
+      let transcribedAnswer = await localWhisperService.transcribeAudioFile(this.activeAudioUri, 'Yes or No');
+      if ((!transcribedAnswer || transcribedAnswer.trim().length === 0) && this.lastRecognizedInterimTranscript) {
+        transcribedAnswer = this.lastRecognizedInterimTranscript;
+      }
+      console.log(`🗣️ [Voice Answer - "Is this for a new project?"]: "${transcribedAnswer}"`);
+
+      // Check if missed speech
+      if (!transcribedAnswer || transcribedAnswer.trim().length === 0) {
+        const handled = await this.handleMissedAnswer(current, async () => {
+          console.log('[VoiceStateMachine] Defaulting to New Project after missed speech.');
+          this.setState({ isNewProject: true });
+          this.currentPromptText = "What is the name of the new project?";
+          this.setState({ isSpeaking: true });
+          await speakPrompt(this.currentPromptText, () => {
+            this.beginRecordingStep(DriveSessionStep.Q1A_NEW_NAME_RECORDING);
+          });
+        });
+        if (handled) return;
+      }
 
       // Check for stop keyword
       if (this.isStopKeyword(transcribedAnswer)) {
@@ -600,7 +935,8 @@ export class VoiceStateMachine {
         return;
       }
 
-      const isNew = await localLlamaEngine.classifyYesNo(transcribedAnswer, true);
+      const isNew = await localLlamaEngine.classifyYesNo(transcribedAnswer, false);
+      console.log(`🤖 [Project Classification]: isNewProject = ${isNew} (${isNew ? 'NEW PROJECT' : 'EXISTING PROJECT'})`);
       this.setState({ isNewProject: isNew });
 
       if (isNew) {
@@ -621,13 +957,49 @@ export class VoiceStateMachine {
       const audioUri = await stopAudioRecording();
       const transcribedName = await localWhisperService.transcribeAudioFile(audioUri || '', 'New Project Name');
 
+      if (!transcribedName || transcribedName.trim().length === 0) {
+        const handled = await this.handleMissedAnswer(current, async () => {
+          const defaultName = `Site Note - ${new Date().toLocaleDateString('en-AU')}`;
+          console.log(`[VoiceStateMachine] Defaulting project name to: ${defaultName}`);
+          this.currentPromptText = "Is this the right location?";
+          this.setState({
+            projectNameText: defaultName,
+            isNewProject: true,
+            projectStatus: 'NEW_PROJECT',
+            isSpeaking: true,
+          });
+          await speakPrompt(this.currentPromptText, () => {
+            this.beginRecordingStep(DriveSessionStep.Q2_LOC_VERIFY_RECORDING);
+          });
+        });
+        if (handled) return;
+      }
+
       if (this.isStopKeyword(transcribedName)) {
         await this.promptCancelConfirmation(current);
         return;
       }
 
-      // Clean the exact spoken project name cleanly without adding extra words
       const cleanProjectName = cleanSpokenProjectName(transcribedName);
+
+      // Check if this project name matches an existing project via fuzzy matching
+      const matchResult = await sqliteQueueService.searchLocalProjects(cleanProjectName, this.state.locationData);
+      if (matchResult.isFuzzyConfirmationNeeded && matchResult.bestMatch) {
+        this.candidateFuzzyProject = matchResult.bestMatch;
+        this.originalSpokenProjectName = cleanProjectName;
+        this.currentPromptText = `Did you mean ${matchResult.bestMatch.name}?`;
+        this.setState({
+          projectNameText: matchResult.bestMatch.name,
+          currentStep: DriveSessionStep.CONFIRM_PROJECT_MATCH_PROMPT,
+          isSpeaking: true,
+          statusMessage: `Fuzzy Match (${Math.round(matchResult.confidence * 100)}%): "Did you mean ${matchResult.bestMatch.name}?"`,
+        });
+
+        await speakPrompt(this.currentPromptText, () => {
+          this.beginRecordingStep(DriveSessionStep.CONFIRM_PROJECT_MATCH_RECORDING);
+        });
+        return;
+      }
 
       this.currentPromptText = "Is this the right location?";
       this.setState({
@@ -645,6 +1017,15 @@ export class VoiceStateMachine {
       const audioUri = await stopAudioRecording();
       const locAns = await localWhisperService.transcribeAudioFile(audioUri || '', 'Yes or No location confirmation');
 
+      if (!locAns || locAns.trim().length === 0) {
+        const handled = await this.handleMissedAnswer(current, async () => {
+          const gpsLocation = await locationService.getCurrentGPSLocation();
+          this.setState({ locationData: gpsLocation });
+          await this.promptUniversalHelpRouter();
+        });
+        if (handled) return;
+      }
+
       if (this.isStopKeyword(locAns)) {
         await this.promptCancelConfirmation(current);
         return;
@@ -654,24 +1035,6 @@ export class VoiceStateMachine {
 
       if (isLocationRight) {
         const gpsLocation = await locationService.getCurrentGPSLocation();
-        const projectName = this.state.projectNameText || 'New Regional Project';
-        const projectId = `proj_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-        
-        let isSynced = 0;
-        if (!firebaseSyncManager.isSimulatedOffline()) {
-          const res = await firestoreService.saveProjectToFirestore({
-            id: projectId,
-            name: projectName,
-            created_at: new Date().toISOString(),
-            synced: 0,
-            latitude: gpsLocation.latitude,
-            longitude: gpsLocation.longitude,
-          });
-          if (res.success) isSynced = 1;
-        }
-
-        await sqliteQueueService.createLocalProject(projectName, { latitude: gpsLocation.latitude, longitude: gpsLocation.longitude }, isSynced);
-
         this.setState({
           locationData: gpsLocation,
         });
@@ -690,6 +1053,15 @@ export class VoiceStateMachine {
       const audioUri = await stopAudioRecording();
       const rawAddress = await localWhisperService.transcribeAudioFile(audioUri || '', 'Job site address');
 
+      if (!rawAddress || rawAddress.trim().length === 0) {
+        const handled = await this.handleMissedAnswer(current, async () => {
+          const gpsLocation = await locationService.getCurrentGPSLocation();
+          this.setState({ locationData: gpsLocation });
+          await this.promptUniversalHelpRouter();
+        });
+        if (handled) return;
+      }
+
       if (this.isStopKeyword(rawAddress)) {
         await this.promptCancelConfirmation(current);
         return;
@@ -701,23 +1073,6 @@ export class VoiceStateMachine {
       );
 
       const manualLocation = locationService.createManualAddressLocation(cleanAddress);
-      const projectName = this.state.projectNameText || 'New Regional Project';
-      const projectId = `proj_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-      
-      let isSynced = 0;
-      if (!firebaseSyncManager.isSimulatedOffline()) {
-        const res = await firestoreService.saveProjectToFirestore({
-          id: projectId,
-          name: projectName,
-          created_at: new Date().toISOString(),
-          synced: 0,
-          address: cleanAddress,
-        });
-        if (res.success) isSynced = 1;
-      }
-
-      await sqliteQueueService.createLocalProject(projectName, { address: cleanAddress }, isSynced);
-
       this.setState({
         locationData: manualLocation,
       });
@@ -729,36 +1084,214 @@ export class VoiceStateMachine {
       const audioUri = await stopAudioRecording();
       const queryText = await localWhisperService.transcribeAudioFile(audioUri || '', 'Existing Project Search');
 
+      if (!queryText || queryText.trim().length === 0) {
+        const handled = await this.handleMissedAnswer(current, async () => {
+          const defaultName = `Site Note - ${new Date().toLocaleDateString('en-AU')}`;
+          this.setState({
+            projectNameText: defaultName,
+            isNewProject: true,
+            projectStatus: 'NEW_PROJECT',
+          });
+          await this.promptUniversalHelpRouter();
+        });
+        if (handled) return;
+      }
+
       if (this.isStopKeyword(queryText)) {
         await this.promptCancelConfirmation(current);
         return;
       }
 
-      const matched = await sqliteQueueService.searchLocalProjects(queryText);
+      // Perform 3-Tier Fuzzy Project Matching (Token overlap + Trade Synonyms + GPS Proximity)
+      const matchResult = await sqliteQueueService.searchLocalProjects(queryText, this.state.locationData);
+      console.log(`[VoiceStateMachine] Project Search Result for "${queryText}":`, matchResult);
 
-      const finalName = matched ? matched.name : queryText;
-      const status: ProjectResolutionStatus = matched ? 'MATCHED' : 'EXISTING_PENDING_MATCH';
+      if (matchResult.isFuzzyConfirmationNeeded && matchResult.bestMatch) {
+        // Confidence between 70% and 94% -> Ask voice confirmation
+        this.candidateFuzzyProject = matchResult.bestMatch;
+        this.originalSpokenProjectName = queryText;
+        this.currentPromptText = `Did you mean ${matchResult.bestMatch.name}?`;
+        this.setState({
+          projectNameText: matchResult.bestMatch.name,
+          currentStep: DriveSessionStep.CONFIRM_PROJECT_MATCH_PROMPT,
+          isSpeaking: true,
+          statusMessage: `Fuzzy Match (${Math.round(matchResult.confidence * 100)}%): "Did you mean ${matchResult.bestMatch.name}?"`,
+        });
 
+        await speakPrompt(this.currentPromptText, () => {
+          this.beginRecordingStep(DriveSessionStep.CONFIRM_PROJECT_MATCH_RECORDING);
+        });
+        return;
+      } else if (matchResult.bestMatch && matchResult.confidence >= 0.95) {
+        // Confidence >= 95% -> Auto-bind directly
+        console.log(`[VoiceStateMachine] Direct match auto-selected: ${matchResult.bestMatch.name}`);
+        this.setState({
+          projectNameText: matchResult.bestMatch.name,
+          isNewProject: false,
+          projectStatus: 'MATCHED',
+          matchedProjectId: matchResult.bestMatch.id,
+        });
+        await this.promptUniversalHelpRouter();
+      } else {
+        // Low confidence / not found -> Ask if user wants to create a new project
+        console.log(`[VoiceStateMachine] Project "${queryText}" not found. Prompting to create new project.`);
+        this.originalSpokenProjectName = queryText;
+        this.candidateFuzzyProject = undefined;
+        this.currentPromptText = `I could not find project ${queryText}, do you want me to create a new project?`;
+        this.setState({
+          projectNameText: queryText,
+          currentStep: DriveSessionStep.CONFIRM_CREATE_NEW_PROJECT_PROMPT,
+          isSpeaking: true,
+          statusMessage: `Project not found. Asking: "${this.currentPromptText}"`,
+        });
+
+        await speakPrompt(this.currentPromptText, () => {
+          this.beginRecordingStep(DriveSessionStep.CONFIRM_CREATE_NEW_PROJECT_RECORDING);
+        });
+        return;
+      }
+
+    // --- FUZZY MATCH CONFIRMATION STEP ---
+    } else if (current === DriveSessionStep.CONFIRM_PROJECT_MATCH_RECORDING) {
+      const audioUri = await stopAudioRecording();
       this.setState({
-        projectNameText: finalName,
-        isNewProject: false,
-        projectStatus: status,
-        matchedProjectId: matched?.id,
+        isRecording: false,
+        currentStep: DriveSessionStep.CONFIRM_PROJECT_MATCH_REASONING,
+        statusMessage: 'Processing project match confirmation...',
       });
 
-      // Advance to Universal Router: "How can I help you today?"
-      await this.promptUniversalHelpRouter();
+      const confirmAnswer = await localWhisperService.transcribeAudioFile(audioUri || '', 'Project Confirmation');
 
-    // --- PHASE 2: UNIVERSAL INTENT ROUTER ("How can I help you today?") ---
+      if (!confirmAnswer || confirmAnswer.trim().length === 0) {
+        const handled = await this.handleMissedAnswer(current, async () => {
+          const requestedName = this.originalSpokenProjectName || 'requested';
+          console.log(`[VoiceStateMachine] No answer to project match confirmation. Asking to create new project: ${requestedName}`);
+          this.candidateFuzzyProject = undefined;
+          this.currentPromptText = `I could not find project ${requestedName}, do you want me to create a new project?`;
+          this.setState({
+            projectNameText: requestedName,
+            currentStep: DriveSessionStep.CONFIRM_CREATE_NEW_PROJECT_PROMPT,
+            isSpeaking: true,
+            statusMessage: `Asking: "${this.currentPromptText}"`,
+          });
+          await speakPrompt(this.currentPromptText, () => {
+            this.beginRecordingStep(DriveSessionStep.CONFIRM_CREATE_NEW_PROJECT_RECORDING);
+          });
+        });
+        if (handled) return;
+      }
+
+      if (this.isStopKeyword(confirmAnswer)) {
+        await this.promptCancelConfirmation(current);
+        return;
+      }
+
+      const isAffirmative = await localLlamaEngine.classifyYesNo(confirmAnswer, false);
+
+      if (isAffirmative && this.candidateFuzzyProject) {
+        console.log(`[VoiceStateMachine] User CONFIRMED project match: ${this.candidateFuzzyProject.name}`);
+        this.setState({
+          projectNameText: this.candidateFuzzyProject.name,
+          isNewProject: false,
+          projectStatus: 'MATCHED',
+          matchedProjectId: this.candidateFuzzyProject.id,
+        });
+        this.candidateFuzzyProject = undefined;
+        this.originalSpokenProjectName = undefined;
+        await this.promptUniversalHelpRouter();
+      } else {
+        const requestedName = this.originalSpokenProjectName || 'requested';
+        console.log(`[VoiceStateMachine] User REJECTED project match. Asking to create new project: ${requestedName}`);
+        this.candidateFuzzyProject = undefined;
+        this.currentPromptText = `I could not find project ${requestedName}, do you want me to create a new project?`;
+        this.setState({
+          projectNameText: requestedName,
+          currentStep: DriveSessionStep.CONFIRM_CREATE_NEW_PROJECT_PROMPT,
+          isSpeaking: true,
+          statusMessage: `Asking: "${this.currentPromptText}"`,
+        });
+
+        await speakPrompt(this.currentPromptText, () => {
+          this.beginRecordingStep(DriveSessionStep.CONFIRM_CREATE_NEW_PROJECT_RECORDING);
+        });
+        return;
+      }
+
+    // --- CREATE NEW PROJECT AFTER NOT FOUND CONFIRMATION STEP ---
+    } else if (current === DriveSessionStep.CONFIRM_CREATE_NEW_PROJECT_RECORDING) {
+      const audioUri = await stopAudioRecording();
+      this.setState({
+        isRecording: false,
+        currentStep: DriveSessionStep.CONFIRM_CREATE_NEW_PROJECT_REASONING,
+        statusMessage: 'Processing new project creation confirmation...',
+      });
+
+      const confirmAnswer = await localWhisperService.transcribeAudioFile(audioUri || '', 'Create New Project Confirmation');
+
+      if (!confirmAnswer || confirmAnswer.trim().length === 0) {
+        const handled = await this.handleMissedAnswer(current, async () => {
+          console.log('[VoiceStateMachine] Closing workflow after unanswered new project confirmation.');
+          this.setState({ isSpeaking: true, statusMessage: 'Workflow closed.' });
+          await speakPrompt("Workflow closed.", () => {
+            this.cancelSession();
+          });
+        });
+        if (handled) return;
+      }
+
+      if (this.isStopKeyword(confirmAnswer)) {
+        await this.promptCancelConfirmation(current);
+        return;
+      }
+
+      const isAffirmative = await localLlamaEngine.classifyYesNo(confirmAnswer, false);
+
+      if (isAffirmative) {
+        const newProjName = cleanSpokenProjectName(this.originalSpokenProjectName || 'New Project');
+        console.log(`[VoiceStateMachine] User agreed to create new project: "${newProjName}"`);
+        this.currentPromptText = "Is this the right location?";
+        this.setState({
+          projectNameText: newProjName,
+          isNewProject: true,
+          projectStatus: 'NEW_PROJECT',
+          matchedProjectId: undefined,
+          isSpeaking: true,
+        });
+
+        await speakPrompt(this.currentPromptText, () => {
+          this.beginRecordingStep(DriveSessionStep.Q2_LOC_VERIFY_RECORDING);
+        });
+      } else {
+        console.log('[VoiceStateMachine] User declined creating a new project. Closing workflow.');
+        this.setState({
+          isSpeaking: true,
+          statusMessage: 'Workflow closed.',
+        });
+        await speakPrompt("Workflow closed.", () => {
+          this.cancelSession();
+        });
+      }
+
+    // --- PHASE 2: UNIVERSAL INTENT ROUTER & ONE-SHOT SLOT EXTRACTION ---
     } else if (current === DriveSessionStep.UNIVERSAL_HELP_ROUTER_RECORDING) {
       const audioUri = await stopAudioRecording();
       this.setState({
         isRecording: false,
         currentStep: DriveSessionStep.UNIVERSAL_HELP_ROUTER_REASONING,
-        statusMessage: 'Routing intent with Llama 3.2...',
+        statusMessage: 'Routing intent & extracting slots with Llama 3.2...',
       });
 
       const spokenIntent = await localWhisperService.transcribeAudioFile(audioUri || '', 'Universal Intent Response');
+
+      if (!spokenIntent || spokenIntent.trim().length === 0) {
+        const handled = await this.handleMissedAnswer(current, async () => {
+          const defaultWf = DEFAULT_WORKFLOW_TEMPLATES[0];
+          console.log(`[VoiceStateMachine] Defaulting to "${defaultWf.name}" after silence.`);
+          this.setActiveWorkflow(defaultWf);
+          await this.executeWorkflowStepAtIndex(0);
+        });
+        if (handled) return;
+      }
 
       if (this.isStopKeyword(spokenIntent)) {
         await this.promptCancelConfirmation(current);
@@ -766,14 +1299,24 @@ export class VoiceStateMachine {
       }
 
       const matchedWorkflow = localLlamaEngine.classifyWorkflowIntent(spokenIntent, DEFAULT_WORKFLOW_TEMPLATES);
-
       console.log(`[VoiceStateMachine] Routed to workflow: ${matchedWorkflow.name}`);
       this.setActiveWorkflow(matchedWorkflow);
 
-      // Start the specific workflow steps
+      // Perform One-Shot Slot Extraction on the initial utterance
+      const oneShot = localLlamaEngine.extractOneShotSlots(spokenIntent, matchedWorkflow);
+      console.log('[VoiceStateMachine] One-shot extracted slots:', oneShot);
+
+      const existingResults = { ...this.state.workflowResults, ...oneShot.slots };
+      this.setState({
+        workflowResults: existingResults,
+        rawTranscriptText: oneShot.summary || this.state.rawTranscriptText,
+        actionItemsText: oneShot.actionItems || this.state.actionItemsText,
+      });
+
+      // Start dynamic workflow steps (will fast-path / skip any slots already extracted)
       await this.executeWorkflowStepAtIndex(0);
 
-    // --- PHASE 3: DYNAMIC WORKFLOW STEP HANDLER ---
+    // --- PHASE 3: DYNAMIC WORKFLOW STEP HANDLER (GUIDED FALLBACK) ---
     } else if (current === DriveSessionStep.WORKFLOW_STEP_RECORDING) {
       const stepDef = this.state.currentStepDefinition;
       if (!stepDef) {
@@ -791,6 +1334,24 @@ export class VoiceStateMachine {
       });
 
       const rawTranscript = await localWhisperService.transcribeAudioFile(audioUri || '', stepDef.name);
+
+      // Handle empty / missed speech on step
+      if (!rawTranscript || rawTranscript.trim().length === 0) {
+        // If this is an optional step, skip immediately without stalling driver
+        if (!stepDef.required) {
+          console.log(`[VoiceStateMachine] ⚡ Optional step "${stepDef.name}" left empty. Skipping cleanly.`);
+          await this.executeWorkflowStepAtIndex(this.state.currentStepIndex + 1);
+          return;
+        }
+
+        // If required step:
+        const handled = await this.handleMissedAnswer(current, async () => {
+          const placeholder = stepDef.placeholderFallback || 'Observation recorded.';
+          this.recordStepResult(stepDef.id, placeholder);
+          await this.executeWorkflowStepAtIndex(this.state.currentStepIndex + 1);
+        });
+        if (handled) return;
+      }
 
       if (this.isStopKeyword(rawTranscript)) {
         await this.promptCancelConfirmation(current);
@@ -832,16 +1393,28 @@ export class VoiceStateMachine {
   }
 
   /**
-   * Prompts the Universal Intent Router: "How can I help you today?"
+   * Prompts the Universal Intent Router: "How can I help you today?" or "Project {name} found, how can I help you today?"
    */
-  private async promptUniversalHelpRouter(): Promise<void> {
-    this.currentPromptText = "How can I help you today?";
+  private async promptUniversalHelpRouter(customPrompt?: string): Promise<void> {
+    const isExistingMatched = !this.state.isNewProject && (this.state.projectStatus === 'MATCHED' || Boolean(this.state.matchedProjectId));
+    const projectName = this.state.projectNameText || 'Project';
+
+    if (customPrompt) {
+      this.currentPromptText = customPrompt;
+    } else if (isExistingMatched) {
+      this.currentPromptText = `Project ${projectName} found, how can I help you today?`;
+    } else {
+      this.currentPromptText = "How can I help you today?";
+    }
+
     this.stepRetryCount = 0;
 
     this.setState({
       currentStep: DriveSessionStep.UNIVERSAL_HELP_ROUTER_PROMPT,
       isSpeaking: true,
-      statusMessage: 'Project saved. Asking: "How can I help you today?"...',
+      statusMessage: isExistingMatched
+        ? `Project "${projectName}" found. Asking: "${this.currentPromptText}"...`
+        : 'Project saved. Asking: "How can I help you today?"...',
     });
 
     await speakPrompt(this.currentPromptText, () => {
@@ -850,7 +1423,7 @@ export class VoiceStateMachine {
   }
 
   /**
-   * Executes dynamic workflow step by index
+   * Executes dynamic workflow step by index with One-Shot Fast Path skipping
    */
   private async executeWorkflowStepAtIndex(index: number): Promise<void> {
     const workflow = this.state.activeWorkflow;
@@ -860,6 +1433,16 @@ export class VoiceStateMachine {
     }
 
     const step = workflow.steps[index];
+
+    // Check if this step was already populated by One-Shot extraction!
+    const existingVal = this.state.workflowResults[step.id];
+    if (existingVal !== undefined && existingVal !== null && String(existingVal).trim().length > 0) {
+      console.log(`[VoiceStateMachine] ⚡ One-Shot Fast Path: Step "${step.name}" already filled with "${existingVal}". Skipping prompt.`);
+      this.setState({ currentStepIndex: index });
+      await this.executeWorkflowStepAtIndex(index + 1);
+      return;
+    }
+
     this.currentPromptText = step.prompt;
     this.stepRetryCount = 0;
 
@@ -883,7 +1466,7 @@ export class VoiceStateMachine {
   }
 
   /**
-   * 3. Complete Workflow & Save to SQLite / Firestore
+   * Complete Workflow & Save to SQLite / Firestore
    */
   private async completeWorkflowExecution(): Promise<void> {
     const workflow = this.state.activeWorkflow;
@@ -905,6 +1488,40 @@ export class VoiceStateMachine {
     const summary = this.state.rawTranscriptText ||
       `Workflow ${workflow.name} recorded for project ${this.state.projectNameText || 'General'}.`;
 
+    let finalProjectId = this.state.matchedProjectId;
+
+    // Atomically commit new project to SQLite & Firestore on complete session ONLY
+    if (this.state.isNewProject && this.state.projectNameText) {
+      const projectName = this.state.projectNameText;
+      const newProjectId = `proj_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+      finalProjectId = newProjectId;
+
+      let isSynced = 0;
+      if (!firebaseSyncManager.isSimulatedOffline()) {
+        const res = await firestoreService.saveProjectToFirestore({
+          id: newProjectId,
+          name: projectName,
+          created_at: new Date().toISOString(),
+          synced: 0,
+          latitude: this.state.locationData?.latitude,
+          longitude: this.state.locationData?.longitude,
+          address: this.state.locationData?.address,
+        });
+        if (res.success) isSynced = 1;
+      }
+
+      await sqliteQueueService.createLocalProject(
+        projectName,
+        {
+          latitude: this.state.locationData?.latitude,
+          longitude: this.state.locationData?.longitude,
+          address: this.state.locationData?.address,
+        },
+        isSynced
+      );
+      console.log(`[VoiceStateMachine] Atomically created new project "${projectName}" (${newProjectId}) on complete.`);
+    }
+
     const record: NoteQueueRecord = {
       id: noteId,
       timestamp: new Date().toISOString(),
@@ -916,7 +1533,7 @@ export class VoiceStateMachine {
       project_name: this.state.projectNameText || 'General Field Operation',
       is_new_project: this.state.isNewProject,
       project_status: this.state.projectStatus,
-      matched_project_id: this.state.matchedProjectId,
+      matched_project_id: finalProjectId,
       latitude: this.state.locationData?.latitude,
       longitude: this.state.locationData?.longitude,
       location_address: this.state.locationData?.address,
@@ -934,7 +1551,7 @@ export class VoiceStateMachine {
     this.setState({
       currentStep: DriveSessionStep.SESSION_COMPLETE,
       isSpeaking: true,
-      statusMessage: `${workflow.name} logged offline. Music resumed.`,
+      statusMessage: `${workflow.name} saved successfully`,
     });
 
     await speakPrompt(workflow.completionMessage, () => {
@@ -952,9 +1569,13 @@ export class VoiceStateMachine {
   }
 
   public async cancelSession(): Promise<void> {
+    this.isAdvancing = false;
+    localWhisperService.setOnInterimTranscript(null);
     this.clearNoSpeechTimeout();
     this.stepRetryCount = 0;
     this.previousStepBeforeCancel = null;
+    this.candidateFuzzyProject = undefined;
+    this.originalSpokenProjectName = undefined;
     await stopSpeech();
     await cancelAudioRecording();
     await releaseAudioFocus();

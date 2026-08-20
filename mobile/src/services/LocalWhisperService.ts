@@ -10,9 +10,14 @@ export class LocalWhisperService {
   private latestWebTranscript: string | null = null;
   private webRecognitionInstance: any = null;
   private isListening = false;
+  private onInterimCallback: ((transcript: string) => void) | null = null;
 
   private constructor() {
     this.initCleanWebRecognition();
+  }
+
+  public setOnInterimTranscript(callback: ((transcript: string) => void) | null): void {
+    this.onInterimCallback = callback;
   }
 
   public static getInstance(): LocalWhisperService {
@@ -49,6 +54,9 @@ export class LocalWhisperService {
             if (cleaned) {
               this.latestWebTranscript = cleaned;
               console.log('[Web Speech Isolated Step]:', this.latestWebTranscript);
+              if (this.onInterimCallback) {
+                this.onInterimCallback(cleaned);
+              }
             }
           };
 
@@ -171,22 +179,9 @@ export class LocalWhisperService {
       }
     }
 
-    // 3. Fallbacks for simulator when no audio hardware is present
-    if (contextPrompt?.includes('Yes or No') || contextPrompt?.includes('new project') || contextPrompt?.includes('confirmation')) {
-      return "Yes";
-    } else if (contextPrompt?.includes('Project Name') || contextPrompt?.includes('New Project Name')) {
-      return "Project One";
-    } else if (contextPrompt?.includes('Existing Project Search')) {
-      return "BHP Pilbara Mining Facility";
-    } else if (contextPrompt?.includes('Universal Intent')) {
-      return "Take note";
-    } else if (contextPrompt?.includes('Materials')) {
-      return "3 PVC elbows and 2 bags of cement";
-    } else if (contextPrompt?.includes('address') || contextPrompt?.includes('location')) {
-      return "42 Victoria Highway, Katherine NT";
-    } else {
-      return "Completed machinery audit and seal inspection on generator.";
-    }
+    // 3. No speech detected or unable to transcribe
+    console.log('[LocalWhisper] No speech detected in audio file.');
+    return '';
   }
 }
 

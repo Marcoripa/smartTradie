@@ -62,7 +62,9 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
     currentStep === DriveSessionStep.Q1_PROJECT_TYPE_REASONING ||
     currentStep === DriveSessionStep.UNIVERSAL_HELP_ROUTER_REASONING ||
     currentStep === DriveSessionStep.WORKFLOW_STEP_REASONING ||
-    currentStep === DriveSessionStep.CONFIRM_CANCEL_REASONING;
+    currentStep === DriveSessionStep.CONFIRM_CANCEL_REASONING ||
+    currentStep === DriveSessionStep.CONFIRM_PROJECT_MATCH_REASONING ||
+    currentStep === DriveSessionStep.CONFIRM_CREATE_NEW_PROJECT_REASONING;
 
   const getStepTitle = () => {
     switch (currentStep) {
@@ -77,6 +79,16 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
         return 'Step 1A: What is the new project name?';
       case DriveSessionStep.Q1B_EXISTING_NAME_RECORDING:
         return 'Step 1B: Search Existing Project Name';
+      case DriveSessionStep.CONFIRM_PROJECT_MATCH_PROMPT:
+      case DriveSessionStep.CONFIRM_PROJECT_MATCH_RECORDING:
+        return `Confirm Match: "${projectNameText}"? (Say Yes or No)`;
+      case DriveSessionStep.CONFIRM_PROJECT_MATCH_REASONING:
+        return 'Llama 3.2: Resolving Project Match...';
+      case DriveSessionStep.CONFIRM_CREATE_NEW_PROJECT_PROMPT:
+      case DriveSessionStep.CONFIRM_CREATE_NEW_PROJECT_RECORDING:
+        return `Project Not Found: Create "${projectNameText}"? (Say Yes or No)`;
+      case DriveSessionStep.CONFIRM_CREATE_NEW_PROJECT_REASONING:
+        return 'Llama 3.2: Evaluating Response...';
       case DriveSessionStep.Q2_LOC_VERIFY_RECORDING:
         return 'Step 1C: Location Verification (GPS)';
       case DriveSessionStep.Q2A_ADDRESS_RECORDING:
@@ -85,7 +97,7 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
       case DriveSessionStep.UNIVERSAL_HELP_ROUTER_RECORDING:
         return 'Step 2: "How can I help you today?"';
       case DriveSessionStep.UNIVERSAL_HELP_ROUTER_REASONING:
-        return 'Llama 3.2: Routing Spoken Intent...';
+        return 'Llama 3.2: Routing Intent & Extracting Slots...';
       case DriveSessionStep.CONFIRM_CANCEL_PROMPT:
       case DriveSessionStep.CONFIRM_CANCEL_RECORDING:
         return 'Cancel Session? (Say Yes or No)';
@@ -101,7 +113,7 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
       case DriveSessionStep.SESSION_COMPLETE:
         return `${activeWorkflow.name} Completed!`;
       default:
-        return `Hands-Free Ready • ${activeWorkflow.name}`;
+        return `Hands-Free Ready`;
     }
   };
 
@@ -119,10 +131,10 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({
   return (
     <View style={styles.container}>
       {/* Active Workflow Badge */}
-      <View style={styles.workflowTag}>
+      {/* <View style={styles.workflowTag}>
         <Layers color="#38BDF8" size={12} />
         <Text style={styles.workflowTagText}>{activeWorkflow.name.toUpperCase()}</Text>
-      </View>
+      </View> */}
 
       <Text style={styles.stepBadge}>{getStepTitle()}</Text>
 

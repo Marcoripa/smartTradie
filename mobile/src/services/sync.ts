@@ -2,6 +2,7 @@ import NetInfo, { NetInfoState } from '@react-native-community/netinfo';
 import { getPendingNotesQueue, updateNoteStatus } from './sqlite';
 import { LocalNoteRecord } from '../types';
 import { Platform } from 'react-native';
+import { appConfigService } from '../config/appConfig';
 
 let BACKEND_URL = 'http://localhost:8000'; // Default backend server
 let isSyncing = false;
@@ -108,6 +109,9 @@ export async function processNoteUpload(note: LocalNoteRecord): Promise<void> {
       },
       body: JSON.stringify({
         local_id: note.id,
+        business_id: appConfigService.getBusinessId(),
+        user_id: appConfigService.getUserId(),
+        user_name: appConfigService.getUserName(),
         created_at: new Date(note.created_at).toISOString(),
         client_audio_path: clientAudioPath,
         content_audio_path: contentAudioPath,

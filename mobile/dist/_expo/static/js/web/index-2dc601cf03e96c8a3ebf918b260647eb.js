@@ -21664,7 +21664,7 @@ __d(function (global, require, _$$_IMPORT_DEFAULT, _$$_IMPORT_ALL, module, expor
           currentStep: DriveSessionStep.Q1_IS_NEW_PROJECT_REASONING,
           statusMessage: 'Analyzing project intent (New vs Existing)...'
         });
-        const transcribedAnswer = await _LocalWhisperService.localWhisperService.transcribeAudioFile(this.q1AudioUri, 'Yes or No new project');
+        const transcribedAnswer = await _LocalWhisperService.localWhisperService.transcribeAudioFile(this.q1AudioUri, 'Yes or No');
         const isNew = await localLlamaEngine.classifyYesNo(transcribedAnswer, true);
         this.setState({
           isNewProject: isNew
